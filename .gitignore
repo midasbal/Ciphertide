@@ -1,3 +1,10 @@
 node_modules/
 .DS_Store
 .claude/settings.local.json
+
+# Internal docs and readme, not tracked for now
+CLAUDE.md
+frontend/README.md
+docs/inco.md
+docs/hackathon.md
+docs/game-design.md
