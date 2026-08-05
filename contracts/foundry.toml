@@ -1,0 +1,17 @@
+[profile.default]
+src = "src"
+test = "src/test"
+out = "out"
+libs = ["node_modules"]
+evm_version = "cancun"
+solc = "0.8.29"
+optimizer = true
+
+[rpc_endpoints]
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+
+[etherscan]
+base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api" }
+
+[lint]
+lint_on_build = false

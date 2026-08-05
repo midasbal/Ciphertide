@@ -1,0 +1,18 @@
+{
+  "name": "confidential-battleship-contracts",
+  "private": true,
+  "version": "0.0.1",
+  "license": "MIT",
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "fmt": "forge fmt"
+  },
+  "dependencies": {
+    "@inco/lightning": "1.0.2",
+    "@openzeppelin/contracts": "^5.3.0",
+    "@safe-global/safe-smart-account": "^1.5.0",
+    "forge-std": "https://github.com/foundry-rs/forge-std",
+    "ds-test": "https://github.com/dapphub/ds-test"
+  }
+}

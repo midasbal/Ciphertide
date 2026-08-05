@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "inco-docs": {
+      "type": "http",
+      "url": "https://docs.inco.org/mcp"
+    }
+  }
+}
