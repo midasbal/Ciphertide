@@ -61,4 +61,13 @@ contract BattleshipHarness is Battleship {
     function getPendingSonarHandle(uint256 matchId) external view returns (bytes32) {
         return ebool.unwrap(matches[matchId].pendingSonarResult);
     }
+
+    function getPendingBarrageHandles(uint256 matchId)
+        external
+        view
+        returns (bytes32 packedHandle, bytes32 allDestroyedHandle)
+    {
+        Match storage m = matches[matchId];
+        return (euint256.unwrap(m.pendingBarragePacked), ebool.unwrap(m.pendingBarrageAllDestroyed));
+    }
 }

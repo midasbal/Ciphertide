@@ -103,6 +103,25 @@ contract BattleshipTest is IncoTest {
         game.confirmSonar(matchId, att, sigs);
     }
 
+    function _confirmPendingBarrage(uint256 matchId, address requester) internal returns (uint256 packedValue) {
+        (bytes32 packedHandle, bytes32 allDestroyedHandle) = game.getPendingBarrageHandles(matchId);
+        (DecryptionAttestation memory packedAtt, bytes[] memory packedSigs) =
+            getDecryptionAttestation(requester, HandleWithProof({handle: packedHandle, proof: _emptyAllowanceProof()}));
+        (DecryptionAttestation memory winAtt, bytes[] memory winSigs) = getDecryptionAttestation(
+            requester, HandleWithProof({handle: allDestroyedHandle, proof: _emptyAllowanceProof()})
+        );
+        game.confirmBarrage(matchId, packedAtt, packedSigs, winAtt, winSigs);
+        packedValue = uint256(packedAtt.value);
+    }
+
+    /// @dev Decodes one 6 bit barrage slot (4 bit local position, 2 bit
+    /// result code: 0 inactive, 1 miss, 2 ship hit, 3 mine) from the packed
+    /// value, mirroring the contract's own packing.
+    function _decodeBarrageSlot(uint256 packedValue, uint8 slotIndex) internal pure returns (uint256 code) {
+        uint256 slotValue = (packedValue >> (uint256(slotIndex) * 6)) & 0x3F;
+        code = slotValue >> 4;
+    }
+
     function _confirmPendingShot(uint256 matchId, address requester) internal {
         (bytes32 hitHandle, bytes32 allDestroyedHandle, bytes32 mineHitHandle) = game.getPendingShotHandles(matchId);
         (DecryptionAttestation memory hitAtt, bytes[] memory hitSigs) =
@@ -428,5 +447,126 @@ contract BattleshipTest is IncoTest {
         vm.prank(user);
         vm.expectRevert("sonar already used");
         game.useSonar(matchId, 0, 0);
+    }
+
+    function _barrageFee() internal view returns (uint256) {
+        uint256 draws = uint256(1) + uint256(game.BARRAGE_MAX_CELLS()) * game.BARRAGE_ATTEMPTS_PER_CELL();
+        return inco.getFee() * draws;
+    }
+
+    function testBarrageStrikesFourToSixCellsAndRevealsEach() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        address user = game.getTurn(matchId);
+
+        vm.deal(user, 1 ether);
+        uint256 fee = _barrageFee();
+        vm.prank(user);
+        game.useBarrage{value: fee}(matchId, 0, 0);
+        processAllOperations();
+        uint256 packed = _confirmPendingBarrage(matchId, user);
+
+        uint256 activeCount = 0;
+        for (uint8 k = 0; k < game.BARRAGE_MAX_CELLS(); k++) {
+            if (_decodeBarrageSlot(packed, k) != 0) activeCount++;
+        }
+        assertGe(activeCount, game.BARRAGE_MIN_CELLS(), "barrage should strike at least the minimum cell count");
+        assertLe(activeCount, game.BARRAGE_MAX_CELLS(), "barrage should never strike more than the maximum");
+    }
+
+    function testBarrageConsumesChargeAndPassesTurn() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        address user = game.getTurn(matchId);
+        address opponent = user == alice ? bob : alice;
+        uint8 userIdx = game.getPlayerAddress(matchId, 0) == user ? 0 : 1;
+
+        vm.deal(user, 1 ether);
+        uint256 fee = _barrageFee();
+        vm.prank(user);
+        game.useBarrage{value: fee}(matchId, 0, 0);
+        processAllOperations();
+        _confirmPendingBarrage(matchId, user);
+
+        assertEq(game.getTurn(matchId), opponent, "barrage is the whole action for the turn, it should pass");
+        assertFalse(game.hasBarrageCharge(matchId, userIdx), "barrage's single charge should now be spent");
+
+        // Pass the turn back so it is user's turn again before checking reuse.
+        vm.prank(opponent);
+        game.shoot(matchId, 224);
+        processAllOperations();
+        _confirmPendingShot(matchId, opponent);
+        assertEq(game.getTurn(matchId), user);
+
+        vm.deal(user, 1 ether);
+        vm.prank(user);
+        vm.expectRevert("barrage already used");
+        game.useBarrage{value: fee}(matchId, 5, 5);
+    }
+
+    /// @dev A barrage covering a mine still applies the mine penalty even
+    /// when the same barrage also lands ship hits, and the penalty is not
+    /// waived by concurrent hits. The area is seeded half mines, half ship
+    /// cells (checkerboard) so a random 4 to 6 cell strike is likely to hit
+    /// both within a handful of independent matches; this loops until it
+    /// observes that co-occurrence at least once and checks the bonus
+    /// fires correctly on every single match along the way.
+    function testBarrageMinePenaltyAppliesAlongsideShipHits() public {
+        uint256[6] memory ships;
+        uint256 shipMask;
+        uint256 mineMask;
+        for (uint8 i = 0; i < 16; i++) {
+            uint8 localRow = i / 4;
+            uint8 localCol = i % 4;
+            uint256 bit = uint256(1) << (localRow * 15 + localCol);
+            if (i % 2 == 0) {
+                mineMask |= bit;
+            } else {
+                shipMask |= bit;
+            }
+        }
+        ships[0] = shipMask;
+
+        bool sawBothInSameBarrage = false;
+        for (uint256 round = 0; round < 10 && !sawBothInSameBarrage; round++) {
+            uint256 matchId = _createAndJoinMatch(alice, bob);
+            game.setBoardForTesting(matchId, 0, shipMask, ships);
+            (uint256 board1, uint256[6] memory ships1) = _tinyShipsBoard();
+            game.setBoardForTesting(matchId, 1, board1, ships1);
+            game.setMinesForTesting(matchId, 0, mineMask, alice);
+            processAllOperations();
+            _rollAndConfirmDiceUntilDecided(matchId, alice);
+
+            // Force alice's board (the mined, half ship checkerboard) to be
+            // the defender: only proceed with rounds where bob is on turn.
+            if (game.getTurn(matchId) != bob) continue;
+
+            vm.deal(bob, 1 ether);
+            uint256 fee = _barrageFee();
+            vm.prank(bob);
+            game.useBarrage{value: fee}(matchId, 0, 0);
+            processAllOperations();
+            uint256 packed = _confirmPendingBarrage(matchId, bob);
+
+            bool sawShipHit = false;
+            bool sawMine = false;
+            for (uint8 k = 0; k < game.BARRAGE_MAX_CELLS(); k++) {
+                uint256 code = _decodeBarrageSlot(packed, k);
+                if (code == 2) sawShipHit = true;
+                if (code == 3) sawMine = true;
+            }
+
+            if (sawMine) {
+                assertTrue(game.hasBonusShot(matchId, 0), "a struck mine should always grant the owner a bonus");
+            } else {
+                assertFalse(game.hasBonusShot(matchId, 0), "no mine struck should mean no bonus granted");
+            }
+
+            if (sawShipHit && sawMine) {
+                sawBothInSameBarrage = true;
+            }
+        }
+
+        assertTrue(sawBothInSameBarrage, "expected at least one barrage to land both a ship hit and a mine");
     }
 }

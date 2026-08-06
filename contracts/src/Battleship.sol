@@ -49,6 +49,18 @@ contract Battleship {
     /// Sonar: one 5x5 area, whole board query, single use per match.
     uint8 public constant SONAR_AREA_SIZE = 5;
 
+    /// Barrage: one 4x4 area, a random 4 to 6 of its 16 cells are struck.
+    /// The first BARRAGE_MIN_CELLS slots are always struck (count is at
+    /// least that many), the remaining slots are conditionally struck
+    /// depending on the random count. Each slot draws BARRAGE_ATTEMPTS_PER_CELL
+    /// independent candidates to land on a cell distinct from every other
+    /// slot and from cells already shot, few attempts suffice since the
+    /// area only has 16 cells and at most 5 are already excluded.
+    uint8 public constant BARRAGE_AREA_SIZE = 4;
+    uint8 public constant BARRAGE_MIN_CELLS = 4;
+    uint8 public constant BARRAGE_MAX_CELLS = 6;
+    uint8 public constant BARRAGE_ATTEMPTS_PER_CELL = 8;
+
     enum Phase {
         WaitingForOpponent,
         Placing,
@@ -100,6 +112,10 @@ contract Battleship {
         ebool pendingAllDestroyed; // shot only
         ebool pendingMineHit; // shot only
         ebool pendingSonarResult; // sonar only
+        euint256 pendingBarragePacked; // barrage only, 6 bits per slot: 4 bit local pos + 2 bit result code
+        ebool pendingBarrageAllDestroyed; // barrage only
+        uint8 pendingBarrageAnchorRow; // barrage only
+        uint8 pendingBarrageAnchorCol; // barrage only
     }
 
     mapping(uint256 => Match) internal matches;
@@ -125,6 +141,15 @@ contract Battleship {
         uint256 indexed matchId, address indexed player, uint8 anchorRow, uint8 anchorCol, bytes32 resultHandle
     );
     event SonarResolved(uint256 indexed matchId, bool anyShip, address indexed nextTurn);
+    event BarrageFired(
+        uint256 indexed matchId,
+        address indexed player,
+        uint8 anchorRow,
+        uint8 anchorCol,
+        bytes32 packedHandle,
+        bytes32 allDestroyedHandle
+    );
+    event BarrageResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine);
     event MatchWon(uint256 indexed matchId, address indexed winner);
     event TimeoutClaimed(uint256 indexed matchId, address indexed claimant);
 
@@ -693,6 +718,277 @@ contract Battleship {
         uint256 rowRun = (uint256(1) << width) - 1;
         for (uint8 r = 0; r < height; r++) {
             mask |= rowRun << ((uint256(row0) + r) * BOARD_SIZE + col0);
+        }
+    }
+
+    /// @notice Strikes a random 4 to 6 of the 16 cells in a caller chosen
+    ///         4x4 area, revealing hit or miss for each struck cell. Ship
+    ///         hits burn cells and can sink ships exactly like a normal
+    ///         shot. If a struck cell is a mine, the mine penalty still
+    ///         applies alongside any ship hits in the same barrage.
+    ///         Consumes the match's single barrage charge and is the
+    ///         player's whole action for the turn.
+    /// @dev The count and the six candidate cells are picked with the same
+    ///      bounded-attempt, first-non-overlapping-candidate pattern as
+    ///      ship placement, entirely on encrypted values. The only reveals
+    ///      are one packed value (six 6 bit slots: 4 bit local position
+    ///      plus a 2 bit result code, 0 inactive, 1 miss, 2 hit, 3 mine),
+    ///      the newly sunk ship mask, and the win bit.
+    function useBarrage(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external payable onlyPlayer(matchId) {
+        Match storage m = matches[matchId];
+        _beginAction(m);
+        require(
+            uint256(anchorRow) + BARRAGE_AREA_SIZE <= BOARD_SIZE
+                && uint256(anchorCol) + BARRAGE_AREA_SIZE <= BOARD_SIZE,
+            "barrage area does not fit on the board"
+        );
+
+        PlayerSlot storage attacker = m.players[m.turn];
+        require(!attacker.barrageUsed, "barrage already used");
+        attacker.barrageUsed = true;
+
+        uint256 totalDraws = uint256(1) + uint256(BARRAGE_MAX_CELLS) * BARRAGE_ATTEMPTS_PER_CELL;
+        require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
+
+        PlayerSlot storage defender = m.players[1 - m.turn];
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
+            _resolveBarrageStrikes(anchorRow, anchorCol, defender);
+
+        packed.allowThis();
+        allDestroyed.allowThis();
+        newlyDestroyed.allowThis();
+        e.reveal(packed);
+        e.reveal(allDestroyed);
+        e.reveal(newlyDestroyed);
+        defender.lastDestroyedMask = newlyDestroyed;
+
+        m.pendingAction = PendingAction.Barrage;
+        m.pendingActor = m.turn;
+        m.pendingBarragePacked = packed;
+        m.pendingBarrageAllDestroyed = allDestroyed;
+        m.pendingBarrageAnchorRow = anchorRow;
+        m.pendingBarrageAnchorCol = anchorCol;
+
+        emit BarrageFired(
+            matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
+        );
+    }
+
+    /// @dev Draws the random count, picks all six candidate slots, and
+    ///      folds the resulting struck cells into ship hit tracking.
+    ///      Pulled out of useBarrage to keep its own stack frame small.
+    function _resolveBarrageStrikes(uint8 anchorRow, uint8 anchorCol, PlayerSlot storage defender)
+        internal
+        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
+    {
+        euint256 struckMask;
+        (packed, struckMask) = _pickAllBarrageSlots(anchorRow, anchorCol, defender);
+        (newlyDestroyed, allDestroyed) = _applyBarrageShipDamage(defender, struckMask);
+    }
+
+    /// @dev Draws the random count and picks all six candidate slots.
+    ///      Pulled out of _resolveBarrageStrikes to keep its stack frame
+    ///      small.
+    function _pickAllBarrageSlots(uint8 anchorRow, uint8 anchorCol, PlayerSlot storage defender)
+        internal
+        returns (euint256 packed, euint256 struckMask)
+    {
+        euint256 count = e.randBounded(uint256(3)).add(uint256(4));
+        euint256 avoid = e.asEuint256(defender.shotsAgainstMe);
+        struckMask = e.asEuint256(uint256(0));
+        packed = e.asEuint256(uint256(0));
+
+        for (uint8 k = 0; k < BARRAGE_MAX_CELLS; k++) {
+            ebool isActive = k < BARRAGE_MIN_CELLS ? e.asEbool(true) : count.gt(uint256(k));
+            (euint256 newAvoid, euint256 packedSlot, euint256 struckContribution) =
+                _pickBarrageSlot(anchorRow, anchorCol, k, isActive, avoid, defender);
+            avoid = newAvoid;
+            packed = packed.or(packedSlot);
+            struckMask = struckMask.or(struckContribution);
+        }
+    }
+
+    /// @dev Folds the struck cells into each ship's hit tracking and
+    ///      computes the newly sunk mask and win bit, the same pattern as
+    ///      a normal shot but against a multi-bit struck mask instead of a
+    ///      single cell.
+    function _applyBarrageShipDamage(PlayerSlot storage defender, euint256 struckMask)
+        internal
+        returns (euint256 newlyDestroyed, ebool allDestroyed)
+    {
+        allDestroyed = e.asEbool(true);
+        newlyDestroyed = e.asEuint256(uint256(0));
+        euint256 shipStruckMask = struckMask.and(defender.boardMask);
+        for (uint8 i = 0; i < NUM_SHIPS; i++) {
+            euint256 oldHits = defender.shipHits[i];
+            ebool wasAlreadyDestroyed = oldHits.eq(defender.shipMask[i]);
+
+            euint256 newHits = oldHits.or(defender.shipMask[i].and(shipStruckMask));
+            newHits.allowThis();
+            defender.shipHits[i] = newHits;
+
+            ebool destroyed = newHits.eq(defender.shipMask[i]);
+            allDestroyed = allDestroyed.and(destroyed);
+
+            ebool justSunk = destroyed.and(wasAlreadyDestroyed.not());
+            newlyDestroyed = newlyDestroyed.or(justSunk.select(defender.shipMask[i], e.asEuint256(uint256(0))));
+        }
+    }
+
+    /// @dev Tries BARRAGE_ATTEMPTS_PER_CELL independent random cells within
+    ///      the 4x4 area for one barrage slot, avoiding every cell already
+    ///      claimed by an earlier slot this barrage or already shot on a
+    ///      previous action, keeping the first non-overlapping candidate.
+    ///      Packs the local position and a result code (0 if this slot
+    ///      never found a free candidate or the random count did not reach
+    ///      it, 1 miss, 2 ship hit, 3 mine) into one 6 bit value.
+    function _pickBarrageSlot(
+        uint8 anchorRow,
+        uint8 anchorCol,
+        uint8 slotIndex,
+        ebool isActive,
+        euint256 avoidSoFar,
+        PlayerSlot storage defender
+    ) internal returns (euint256 newAvoid, euint256 packedSlot, euint256 struckContribution) {
+        euint256 localPos;
+        euint256 candidateMask;
+        ebool found;
+        (newAvoid, localPos, candidateMask, found) = _findDistinctBarrageCell(anchorRow, anchorCol, avoidSoFar);
+
+        ebool trulyActive = isActive.and(found);
+        euint256 code = _barrageResultCode(trulyActive, candidateMask, defender.mineMask, defender.boardMask);
+
+        packedSlot = localPos.or(code.shl(uint256(4))).shl(uint256(slotIndex) * 6);
+        struckContribution = trulyActive.select(candidateMask, e.asEuint256(uint256(0)));
+    }
+
+    /// @dev Runs the bounded-attempt retry to find one cell in the 4x4 area
+    ///      distinct from every cell in avoidSoFar, split out to keep
+    ///      _pickBarrageSlot's stack frame small.
+    function _findDistinctBarrageCell(uint8 anchorRow, uint8 anchorCol, euint256 avoidSoFar)
+        internal
+        returns (euint256 newAvoid, euint256 localPos, euint256 candidateMask, ebool found)
+    {
+        localPos = e.asEuint256(uint256(0));
+        candidateMask = e.asEuint256(uint256(0));
+        found = e.asEbool(false);
+
+        for (uint8 attempt = 0; attempt < BARRAGE_ATTEMPTS_PER_CELL; attempt++) {
+            euint256 idx = e.randBounded(uint256(BARRAGE_AREA_SIZE) * uint256(BARRAGE_AREA_SIZE));
+            euint256 candidateBit = e.asEuint256(uint256(1)).shl(_localToGlobalCell(idx, anchorRow, anchorCol));
+
+            ebool accept = found.not().and(candidateBit.and(avoidSoFar).eq(uint256(0)));
+
+            avoidSoFar = accept.select(avoidSoFar.or(candidateBit), avoidSoFar);
+            localPos = accept.select(idx, localPos);
+            candidateMask = accept.select(candidateBit, candidateMask);
+            found = found.or(accept);
+        }
+        newAvoid = avoidSoFar;
+    }
+
+    /// @dev Classifies one barrage candidate cell into a result code: 0
+    ///      inactive, 1 miss, 2 ship hit, 3 mine.
+    function _barrageResultCode(ebool trulyActive, euint256 candidateMask, euint256 mineMask, euint256 boardMask)
+        internal
+        returns (euint256)
+    {
+        ebool isMine = candidateMask.and(mineMask).ne(uint256(0));
+        ebool isShipHit = candidateMask.and(boardMask).ne(uint256(0));
+        return trulyActive.select(
+            isMine.select(
+                e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1)))
+            ),
+            e.asEuint256(uint256(0))
+        );
+    }
+
+    function _localToGlobalCell(euint256 localIdx, uint8 anchorRow, uint8 anchorCol) internal returns (euint256) {
+        euint256 localRow = localIdx.div(uint256(BARRAGE_AREA_SIZE));
+        euint256 localCol = localIdx.rem(uint256(BARRAGE_AREA_SIZE));
+        return localRow.add(uint256(anchorRow)).mul(uint256(BOARD_SIZE)).add(localCol.add(uint256(anchorCol)));
+    }
+
+    /// @dev Decodes the six packed slots, marks every active slot's cell as
+    ///      shot, and emits per-cell results. Returns whether any struck
+    ///      cell was a mine, pulled into its own function to keep
+    ///      confirmBarrage's stack frame small.
+    function _applyBarrageResults(uint256 matchId, PlayerSlot storage defender, uint256 packed, Match storage m)
+        internal
+        returns (bool anyMineTriggered)
+    {
+        for (uint8 k = 0; k < BARRAGE_MAX_CELLS; k++) {
+            uint256 slotValue = (packed >> (uint256(k) * 6)) & 0x3F;
+            uint256 code = slotValue >> 4;
+            if (code == 0) continue;
+
+            uint256 localPos = slotValue & 0xF;
+            uint8 globalCell = uint8(
+                (localPos / BARRAGE_AREA_SIZE + m.pendingBarrageAnchorRow) * BOARD_SIZE
+                    + (localPos % BARRAGE_AREA_SIZE + m.pendingBarrageAnchorCol)
+            );
+            defender.shotsAgainstMe |= (uint256(1) << globalCell);
+            if (code == 3) {
+                anyMineTriggered = true;
+            }
+            // A mine cell always reads as a miss, ship hit is the only
+            // code that reports a genuine hit.
+            emit BarrageResolved(matchId, globalCell, code == 2, code == 3);
+        }
+    }
+
+    /// @notice Confirms a pending barrage: marks every struck cell as shot,
+    ///         applies the single non-stacking mine bonus if any struck
+    ///         cell was a mine, and resolves the win or turn pass. Barrage
+    ///         is the player's whole action for the turn, so it always
+    ///         ends the turn afterward, exactly like sonar, except a
+    ///         pending bonus action grants one more action here too.
+    /// @dev If a barrage happens to cover both of the defender's mines in
+    ///      one action, both attest as code 3, but the bonus flag below is
+    ///      only ever set to true, never incremented, so the owner still
+    ///      gets exactly one extra action, not two.
+    function confirmBarrage(
+        uint256 matchId,
+        DecryptionAttestation memory packedAttestation,
+        bytes[] memory packedSignatures,
+        DecryptionAttestation memory allDestroyedAttestation,
+        bytes[] memory allDestroyedSignatures
+    ) external {
+        Match storage m = matches[matchId];
+        require(m.pendingAction == PendingAction.Barrage, "no pending barrage");
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
+            "invalid barrage attestation"
+        );
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
+            "invalid win attestation"
+        );
+        require(euint256.unwrap(m.pendingBarragePacked) == packedAttestation.handle, "barrage handle mismatch");
+        require(ebool.unwrap(m.pendingBarrageAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
+
+        uint8 actorIdx = m.pendingActor;
+        address actor = m.players[actorIdx].addr;
+        PlayerSlot storage defender = m.players[1 - actorIdx];
+        bool won = asBool(allDestroyedAttestation.value);
+        bool anyMineTriggered = _applyBarrageResults(matchId, defender, uint256(packedAttestation.value), m);
+
+        m.pendingAction = PendingAction.None;
+        if (anyMineTriggered) {
+            m.players[1 - actorIdx].bonusShotAvailable = true;
+        }
+
+        if (won) {
+            m.phase = Phase.Finished;
+            m.winner = actor;
+            emit MatchWon(matchId, actor);
+        } else {
+            if (m.players[actorIdx].bonusShotAvailable) {
+                m.players[actorIdx].bonusShotAvailable = false;
+            } else {
+                m.turn = 1 - actorIdx;
+            }
+            m.lastMoveTimestamp = block.timestamp;
         }
     }
 
