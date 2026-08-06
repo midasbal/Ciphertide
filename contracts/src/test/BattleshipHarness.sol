@@ -57,4 +57,8 @@ contract BattleshipHarness is Battleship {
     function forcePlacementFailureForTesting(uint256 matchId, uint8 playerIdx) external {
         _runPlacement(matchId, playerIdx, e.asEuint256(type(uint256).max));
     }
+
+    function getPendingSonarHandle(uint256 matchId) external view returns (bytes32) {
+        return ebool.unwrap(matches[matchId].pendingSonarResult);
+    }
 }

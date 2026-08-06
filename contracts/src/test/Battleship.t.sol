@@ -96,6 +96,13 @@ contract BattleshipTest is IncoTest {
         game.confirmDiceRoll(matchId, attA, sigA, attB, sigB);
     }
 
+    function _confirmPendingSonar(uint256 matchId, address requester) internal {
+        bytes32 handle = game.getPendingSonarHandle(matchId);
+        (DecryptionAttestation memory att, bytes[] memory sigs) =
+            getDecryptionAttestation(requester, HandleWithProof({handle: handle, proof: _emptyAllowanceProof()}));
+        game.confirmSonar(matchId, att, sigs);
+    }
+
     function _confirmPendingShot(uint256 matchId, address requester) internal {
         (bytes32 hitHandle, bytes32 allDestroyedHandle, bytes32 mineHitHandle) = game.getPendingShotHandles(matchId);
         (DecryptionAttestation memory hitAtt, bytes[] memory hitSigs) =
@@ -366,5 +373,60 @@ contract BattleshipTest is IncoTest {
         _confirmPendingShot(matchId, defender);
 
         assertEq(game.getTurn(matchId), shooter, "with the bonus spent, a miss passes the turn again");
+    }
+
+    function testSonarReturnsCorrectYesAndDoesNotExposeTheBoard() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+
+        address user = game.getTurn(matchId);
+        address opponent = user == alice ? bob : alice;
+        uint8 userIdx = game.getPlayerAddress(matchId, 0) == user ? 0 : 1;
+
+        // Rows 0..4, cols 0..4 definitely contain a ship cell on the
+        // standard test board (row 0 is a length 5 ship across cols 0..4).
+        vm.prank(user);
+        game.useSonar(matchId, 0, 0);
+        processAllOperations();
+        _confirmPendingSonar(matchId, user);
+
+        assertEq(game.getTurn(matchId), opponent, "sonar is the whole action for the turn, it should pass");
+        assertFalse(game.hasSonarCharge(matchId, userIdx), "sonar's single charge should now be spent");
+
+        uint8 opponentIdx = 1 - userIdx;
+        euint256 opponentBoard = game.getBoardMask(matchId, opponentIdx);
+        assertFalse(inco.isAllowed(euint256.unwrap(opponentBoard), user), "sonar must not expose the full board");
+    }
+
+    function testSonarReturnsCorrectNoAndCannotBeReused() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+
+        address user = game.getTurn(matchId);
+        address opponent = user == alice ? bob : alice;
+
+        // Rows 10..14, cols 10..14 are empty on both test boards.
+        vm.prank(user);
+        game.useSonar(matchId, 10, 10);
+        processAllOperations();
+
+        bytes32 handle = game.getPendingSonarHandle(matchId);
+        (DecryptionAttestation memory att, bytes[] memory sigs) =
+            getDecryptionAttestation(user, HandleWithProof({handle: handle, proof: _emptyAllowanceProof()}));
+        assertEq(uint256(att.value), 0, "an empty area should attest to no");
+        game.confirmSonar(matchId, att, sigs);
+
+        // Sonar always passes the turn, so it is now the opponent's turn.
+        // Have them take a genuine miss (cell 224 is empty on both test
+        // boards) to pass the turn back to the original sonar user.
+        vm.prank(opponent);
+        game.shoot(matchId, 224);
+        processAllOperations();
+        _confirmPendingShot(matchId, opponent);
+        assertEq(game.getTurn(matchId), user);
+
+        vm.prank(user);
+        vm.expectRevert("sonar already used");
+        game.useSonar(matchId, 0, 0);
     }
 }

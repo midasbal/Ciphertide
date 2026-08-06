@@ -46,6 +46,9 @@ contract Battleship {
     uint8 public constant MINES_PER_PLAYER = 2;
     uint8 public constant MINE_PLACEMENT_ATTEMPTS = 10;
 
+    /// Sonar: one 5x5 area, whole board query, single use per match.
+    uint8 public constant SONAR_AREA_SIZE = 5;
+
     enum Phase {
         WaitingForOpponent,
         Placing,
@@ -96,6 +99,7 @@ contract Battleship {
         ebool pendingHit; // shot only
         ebool pendingAllDestroyed; // shot only
         ebool pendingMineHit; // shot only
+        ebool pendingSonarResult; // sonar only
     }
 
     mapping(uint256 => Match) internal matches;
@@ -117,6 +121,10 @@ contract Battleship {
         bytes32 newlyDestroyedHandle
     );
     event ShotResolved(uint256 indexed matchId, uint8 cell, bool hit, address indexed nextTurn);
+    event SonarFired(
+        uint256 indexed matchId, address indexed player, uint8 anchorRow, uint8 anchorCol, bytes32 resultHandle
+    );
+    event SonarResolved(uint256 indexed matchId, bool anyShip, address indexed nextTurn);
     event MatchWon(uint256 indexed matchId, address indexed winner);
     event TimeoutClaimed(uint256 indexed matchId, address indexed claimant);
 
@@ -618,6 +626,76 @@ contract Battleship {
         emit ShotResolved(matchId, m.pendingCell, hit, m.players[m.turn].addr);
     }
 
+    /// @notice Queries a 5x5 area of the opponent's board for any ship
+    ///         cell, revealing only a yes or no bit, never which cell or
+    ///         how many. Consumes the match's single sonar charge and is
+    ///         the player's whole action for the turn.
+    /// @dev No random draws and no ciphertext inputs are involved (the area
+    ///      is a plaintext rectangle the caller picked, and.and()/ne()/
+    ///      reveal() are all free), so this needs no fee.
+    function useSonar(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external onlyPlayer(matchId) {
+        Match storage m = matches[matchId];
+        _beginAction(m);
+        require(
+            uint256(anchorRow) + SONAR_AREA_SIZE <= BOARD_SIZE && uint256(anchorCol) + SONAR_AREA_SIZE <= BOARD_SIZE,
+            "sonar area does not fit on the board"
+        );
+
+        PlayerSlot storage attacker = m.players[m.turn];
+        require(!attacker.sonarUsed, "sonar already used");
+        attacker.sonarUsed = true;
+
+        PlayerSlot storage defender = m.players[1 - m.turn];
+        uint256 areaMask = _rectMask(anchorRow, anchorCol, SONAR_AREA_SIZE, SONAR_AREA_SIZE);
+
+        ebool anyShip = defender.boardMask.and(areaMask).ne(uint256(0));
+        anyShip.allowThis();
+        e.reveal(anyShip);
+
+        m.pendingAction = PendingAction.Sonar;
+        m.pendingActor = m.turn;
+        m.pendingSonarResult = anyShip;
+
+        emit SonarFired(matchId, msg.sender, anchorRow, anchorCol, ebool.unwrap(anyShip));
+    }
+
+    function confirmSonar(uint256 matchId, DecryptionAttestation memory attestation, bytes[] memory signatures)
+        external
+    {
+        Match storage m = matches[matchId];
+        require(m.pendingAction == PendingAction.Sonar, "no pending sonar");
+        require(inco.incoVerifier().isValidDecryptionAttestation(attestation, signatures), "invalid sonar attestation");
+        require(ebool.unwrap(m.pendingSonarResult) == attestation.handle, "sonar handle mismatch");
+
+        m.pendingAction = PendingAction.None;
+        uint8 actor = m.pendingActor;
+        bool anyShip = asBool(attestation.value);
+
+        // Sonar is the player's whole action for the turn: it always ends
+        // the turn afterward, except a pending bonus action from an
+        // earlier mine trigger grants one more action here too, exactly
+        // like a shot's miss would.
+        if (m.players[actor].bonusShotAvailable) {
+            m.players[actor].bonusShotAvailable = false;
+        } else {
+            m.turn = 1 - actor;
+        }
+        m.lastMoveTimestamp = block.timestamp;
+
+        emit SonarResolved(matchId, anyShip, m.players[m.turn].addr);
+    }
+
+    /// @dev Plaintext mask for a height x width rectangle anchored at
+    ///      (row0, col0) on the BOARD_SIZE x BOARD_SIZE board. Pure
+    ///      arithmetic, no encrypted values involved, since the area itself
+    ///      is a public choice, only its contents are confidential.
+    function _rectMask(uint8 row0, uint8 col0, uint8 height, uint8 width) internal pure returns (uint256 mask) {
+        uint256 rowRun = (uint256(1) << width) - 1;
+        for (uint8 r = 0; r < height; r++) {
+            mask |= rowRun << ((uint256(row0) + r) * BOARD_SIZE + col0);
+        }
+    }
+
     function claimTimeout(uint256 matchId) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         require(m.phase == Phase.InProgress, "match not in progress");
@@ -675,5 +753,13 @@ contract Battleship {
 
     function hasBonusShot(uint256 matchId, uint8 playerIdx) external view returns (bool) {
         return matches[matchId].players[playerIdx].bonusShotAvailable;
+    }
+
+    function hasSonarCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return !matches[matchId].players[playerIdx].sonarUsed;
+    }
+
+    function hasBarrageCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return !matches[matchId].players[playerIdx].barrageUsed;
     }
 }
