@@ -27,10 +27,14 @@ contract BattleshipHarness is Battleship {
     function getPendingShotHandles(uint256 matchId)
         external
         view
-        returns (bytes32 hitHandle, bytes32 allDestroyedHandle)
+        returns (bytes32 hitHandle, bytes32 allDestroyedHandle, bytes32 mineHitHandle)
     {
         Match storage m = matches[matchId];
-        return (ebool.unwrap(m.pendingHit), ebool.unwrap(m.pendingAllDestroyed));
+        return (ebool.unwrap(m.pendingHit), ebool.unwrap(m.pendingAllDestroyed), ebool.unwrap(m.pendingMineHit));
+    }
+
+    function setMinesForTesting(uint256 matchId, uint8 playerIdx, uint256 mineMaskPlain, address owner) external {
+        _setMinesForTesting(matchId, playerIdx, mineMaskPlain, owner);
     }
 
     function getPendingPlacementHandle(uint256 matchId, uint8 playerIdx) external view returns (bytes32) {

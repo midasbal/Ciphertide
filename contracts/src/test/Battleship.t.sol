@@ -97,13 +97,15 @@ contract BattleshipTest is IncoTest {
     }
 
     function _confirmPendingShot(uint256 matchId, address requester) internal {
-        (bytes32 hitHandle, bytes32 allDestroyedHandle) = game.getPendingShotHandles(matchId);
+        (bytes32 hitHandle, bytes32 allDestroyedHandle, bytes32 mineHitHandle) = game.getPendingShotHandles(matchId);
         (DecryptionAttestation memory hitAtt, bytes[] memory hitSigs) =
             getDecryptionAttestation(requester, HandleWithProof({handle: hitHandle, proof: _emptyAllowanceProof()}));
         (DecryptionAttestation memory winAtt, bytes[] memory winSigs) = getDecryptionAttestation(
             requester, HandleWithProof({handle: allDestroyedHandle, proof: _emptyAllowanceProof()})
         );
-        game.confirmShot(matchId, hitAtt, hitSigs, winAtt, winSigs);
+        (DecryptionAttestation memory mineAtt, bytes[] memory mineSigs) =
+            getDecryptionAttestation(requester, HandleWithProof({handle: mineHitHandle, proof: _emptyAllowanceProof()}));
+        game.confirmShot(matchId, hitAtt, hitSigs, winAtt, winSigs, mineAtt, mineSigs);
     }
 
     function testCreateAndJoinMatch() public {
@@ -319,5 +321,50 @@ contract BattleshipTest is IncoTest {
         // The match is still awaiting confirmation, not decided by timeout.
         assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.InProgress));
         assertEq(game.getWinner(matchId), address(0));
+    }
+
+    /// @dev A shot landing on a mine reads as a miss (it still passes the
+    /// turn immediately, mines do not protect the current shot) but grants
+    /// the mine's owner a bonus action on their next turn: their first miss
+    /// on that turn does not end it. The bonus is spent after being
+    /// consulted once, whether that first action was a hit or a miss.
+    function testMineTriggerReadsAsMissAndGrantsBonusShot() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+
+        address shooter = game.getTurn(matchId);
+        address defender = shooter == alice ? bob : alice;
+        uint8 defenderIdx = game.getPlayerAddress(matchId, 0) == defender ? 0 : 1;
+
+        // Cell 220 is empty on both test boards, seed it as the defender's
+        // only mine.
+        game.setMinesForTesting(matchId, defenderIdx, uint256(1) << 220, defender);
+        processAllOperations();
+
+        vm.prank(shooter);
+        game.shoot(matchId, 220);
+        processAllOperations();
+        _confirmPendingShot(matchId, shooter);
+
+        assertEq(game.getTurn(matchId), defender, "a mine still reads as a miss, turn passes normally");
+        assertTrue(game.hasBonusShot(matchId, defenderIdx), "triggering the mine should grant the owner a bonus");
+
+        // Defender's first shot on their next turn is a genuine miss (cell
+        // 221 is empty on both boards). The bonus should keep their turn.
+        vm.prank(defender);
+        game.shoot(matchId, 221);
+        processAllOperations();
+        _confirmPendingShot(matchId, defender);
+
+        assertEq(game.getTurn(matchId), defender, "the bonus should keep the turn through the first miss");
+        assertFalse(game.hasBonusShot(matchId, defenderIdx), "the bonus should be spent after being used once");
+
+        // A second miss with no bonus left should pass the turn normally.
+        vm.prank(defender);
+        game.shoot(matchId, 222);
+        processAllOperations();
+        _confirmPendingShot(matchId, defender);
+
+        assertEq(game.getTurn(matchId), shooter, "with the bonus spent, a miss passes the turn again");
     }
 }

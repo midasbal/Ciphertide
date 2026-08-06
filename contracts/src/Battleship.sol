@@ -39,6 +39,13 @@ contract Battleship {
     /// if gas is too high.
     uint8 public constant PLACEMENT_ATTEMPTS_PER_SHIP = 20;
 
+    /// Two mines per player, placed on water cells only. Fewer attempts
+    /// than ship placement since a mine only has to avoid the ship cells
+    /// (about 10% of the board) and at most one other mine, a much lower
+    /// collision rate than packing a whole fleet.
+    uint8 public constant MINES_PER_PLAYER = 2;
+    uint8 public constant MINE_PLACEMENT_ATTEMPTS = 10;
+
     enum Phase {
         WaitingForOpponent,
         Placing,
@@ -54,10 +61,24 @@ contract Battleship {
         euint256[NUM_SHIPS] shipMask; // cells occupied by each ship, disjoint
         euint256[NUM_SHIPS] shipHits; // subset of shipMask hit so far
         euint256 lastDestroyedMask; // the ship (if any) sunk by the most recent shot, else 0, always safe to reveal
+        euint256 mineMask; // this player's own mines, never allowed to the opponent
         uint256 shotsAgainstMe; // plain bitmask, cells already shot at on this board
         uint256 remainingTime;
         bool placementPending;
         ebool pendingAllPlaced;
+        bool bonusShotAvailable; // set when the opponent triggers one of this player's mines
+        bool sonarUsed;
+        bool barrageUsed;
+    }
+
+    /// At most one action (a normal shot, sonar, or barrage) can be in
+    /// flight at a time, awaiting its confirmation before the next action
+    /// is allowed.
+    enum PendingAction {
+        None,
+        Shot,
+        Sonar,
+        Barrage
     }
 
     struct Match {
@@ -69,11 +90,12 @@ contract Battleship {
         euint256 rollA;
         euint256 rollB;
         bool dicePending;
-        bool shotPending;
-        uint8 pendingShooter;
-        uint8 pendingCell;
-        ebool pendingHit;
-        ebool pendingAllDestroyed;
+        PendingAction pendingAction;
+        uint8 pendingActor; // index of the player who took the pending action
+        uint8 pendingCell; // shot only
+        ebool pendingHit; // shot only
+        ebool pendingAllDestroyed; // shot only
+        ebool pendingMineHit; // shot only
     }
 
     mapping(uint256 => Match) internal matches;
@@ -140,7 +162,8 @@ contract Battleship {
         require(!p.placed, "already placed");
         require(!p.placementPending, "placement already submitted, awaiting confirmation");
 
-        uint256 totalDraws = uint256(NUM_SHIPS) * PLACEMENT_ATTEMPTS_PER_SHIP;
+        uint256 totalDraws =
+            uint256(NUM_SHIPS) * PLACEMENT_ATTEMPTS_PER_SHIP + uint256(MINES_PER_PLAYER) * MINE_PLACEMENT_ATTEMPTS;
         require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
 
         _runPlacement(matchId, playerIdx, e.asEuint256(uint256(0)));
@@ -168,12 +191,21 @@ contract Battleship {
             allPlaced = allPlaced.and(placedThisShip);
         }
 
+        // Mines are placed after the fleet, avoiding every ship cell, so
+        // they land on water only. They must never be allowed to the
+        // opponent, only to this contract and the owner.
+        (euint256 mineMask, ebool allMinesPlaced) = _placeMines(occupied);
+        allPlaced = allPlaced.and(allMinesPlaced);
+
         occupied.allowThis();
         occupied.allow(msg.sender);
+        mineMask.allowThis();
+        mineMask.allow(msg.sender);
         allPlaced.allowThis();
         e.reveal(allPlaced);
 
         p.boardMask = occupied;
+        p.mineMask = mineMask;
         for (uint8 i = 0; i < NUM_SHIPS; i++) {
             shipMasks[i].allowThis();
             shipMasks[i].allow(msg.sender);
@@ -191,6 +223,38 @@ contract Battleship {
         p.pendingAllPlaced = allPlaced;
 
         emit PlacementSubmitted(matchId, msg.sender, ebool.unwrap(allPlaced));
+    }
+
+    /// @dev Places MINES_PER_PLAYER single-cell mines, each with
+    ///      MINE_PLACEMENT_ATTEMPTS independent random candidate cells,
+    ///      avoiding every ship cell (shipOccupied) and every previously
+    ///      placed mine this call. Same bounded-attempt, first-non-
+    ///      overlapping-candidate-wins pattern as ship placement, scoped to
+    ///      a single cell instead of a run.
+    function _placeMines(euint256 shipOccupied) internal returns (euint256 mineMask, ebool allPlaced) {
+        mineMask = e.asEuint256(uint256(0));
+        allPlaced = e.asEbool(true);
+        euint256 avoid = shipOccupied;
+
+        for (uint8 i = 0; i < MINES_PER_PLAYER; i++) {
+            ebool placedThisMine = e.asEbool(false);
+            euint256 thisMineMask = e.asEuint256(uint256(0));
+
+            for (uint8 attempt = 0; attempt < MINE_PLACEMENT_ATTEMPTS; attempt++) {
+                euint256 idx = e.randBounded(uint256(BOARD_CELLS));
+                euint256 candidate = e.asEuint256(uint256(1)).shl(idx);
+
+                ebool noOverlap = candidate.and(avoid).eq(uint256(0));
+                ebool accept = placedThisMine.not().and(noOverlap);
+
+                avoid = accept.select(avoid.or(candidate), avoid);
+                thisMineMask = accept.select(candidate, thisMineMask);
+                placedThisMine = placedThisMine.or(accept);
+            }
+
+            mineMask = mineMask.or(thisMineMask);
+            allPlaced = allPlaced.and(placedThisMine);
+        }
     }
 
     /// @dev Tries PLACEMENT_ATTEMPTS_PER_SHIP independent random candidate
@@ -327,9 +391,24 @@ contract Battleship {
         zeroDestroyed.allowThis();
         p.lastDestroyedMask = zeroDestroyed;
 
+        euint256 zeroMines = e.asEuint256(uint256(0));
+        zeroMines.allowThis();
+        p.mineMask = zeroMines;
+
         if (m.players[0].placed && m.players[1].placed) {
             m.phase = Phase.AwaitingDiceRoll;
         }
+    }
+
+    /// @dev Test-only hook to seed a player's mines directly on top of an
+    ///      already-seeded board, so mine trigger and bonus shot behavior
+    ///      can be tested with known mine positions.
+    function _setMinesForTesting(uint256 matchId, uint8 playerIdx, uint256 mineMaskPlain, address owner) internal {
+        PlayerSlot storage p = matches[matchId].players[playerIdx];
+        euint256 mineMask = e.asEuint256(mineMaskPlain);
+        mineMask.allowThis();
+        mineMask.allow(owner);
+        p.mineMask = mineMask;
     }
 
     function rollDice(uint256 matchId) external payable onlyPlayer(matchId) {
@@ -393,11 +472,13 @@ contract Battleship {
         emit GameStarted(matchId, m.players[m.turn].addr);
     }
 
-    function shoot(uint256 matchId, uint8 cell) external onlyPlayer(matchId) {
-        require(cell < BOARD_CELLS, "cell out of range");
-        Match storage m = matches[matchId];
+    /// @dev Shared preamble for any player action (shoot, sonar, barrage):
+    ///      checks phase, turn, that no other action is pending, charges the
+    ///      elapsed decision time against the clock, and resets the clock so
+    ///      the awaiting-confirmation window starts fresh.
+    function _beginAction(Match storage m) internal {
         require(m.phase == Phase.InProgress, "match not in progress");
-        require(!m.shotPending, "previous shot not yet confirmed");
+        require(m.pendingAction == PendingAction.None, "previous action not yet confirmed");
         require(msg.sender == m.players[m.turn].addr, "not your turn");
 
         uint256 elapsed = block.timestamp - m.lastMoveTimestamp;
@@ -407,11 +488,13 @@ contract Battleship {
         );
         m.players[m.turn].remainingTime =
             elapsed >= m.players[m.turn].remainingTime ? 0 : m.players[m.turn].remainingTime - elapsed;
-        // Reset the clock here, once the shooter's decision time has been
-        // charged, so the awaiting-confirmation window starts its own fresh
-        // clock instead of the pre-shot elapsed time being charged twice
-        // against whichever player claimTimeout later checks.
         m.lastMoveTimestamp = block.timestamp;
+    }
+
+    function shoot(uint256 matchId, uint8 cell) external onlyPlayer(matchId) {
+        require(cell < BOARD_CELLS, "cell out of range");
+        Match storage m = matches[matchId];
+        _beginAction(m);
 
         uint8 defenderIdx = 1 - m.turn;
         PlayerSlot storage defender = m.players[defenderIdx];
@@ -421,6 +504,9 @@ contract Battleship {
         uint256 shotBit = uint256(1) << cell;
         ebool hit = defender.boardMask.and(shotBit).ne(uint256(0));
         hit.allowThis();
+
+        ebool mineHit = defender.mineMask.and(shotBit).ne(uint256(0));
+        mineHit.allowThis();
 
         ebool allDestroyed = e.asEbool(true);
         euint256 newlyDestroyed = e.asEuint256(uint256(0));
@@ -447,15 +533,17 @@ contract Battleship {
         allDestroyed.allowThis();
         newlyDestroyed.allowThis();
         e.reveal(hit);
+        e.reveal(mineHit);
         e.reveal(allDestroyed);
         e.reveal(newlyDestroyed);
         defender.lastDestroyedMask = newlyDestroyed;
 
-        m.shotPending = true;
-        m.pendingShooter = m.turn;
+        m.pendingAction = PendingAction.Shot;
+        m.pendingActor = m.turn;
         m.pendingCell = cell;
         m.pendingHit = hit;
         m.pendingAllDestroyed = allDestroyed;
+        m.pendingMineHit = mineHit;
 
         emit ShotFired(
             matchId, msg.sender, cell, ebool.unwrap(hit), ebool.unwrap(allDestroyed), euint256.unwrap(newlyDestroyed)
@@ -467,10 +555,12 @@ contract Battleship {
         DecryptionAttestation memory hitAttestation,
         bytes[] memory hitSignatures,
         DecryptionAttestation memory allDestroyedAttestation,
-        bytes[] memory allDestroyedSignatures
+        bytes[] memory allDestroyedSignatures,
+        DecryptionAttestation memory mineHitAttestation,
+        bytes[] memory mineHitSignatures
     ) external {
         Match storage m = matches[matchId];
-        require(m.shotPending, "no pending shot");
+        require(m.pendingAction == PendingAction.Shot, "no pending shot");
         require(
             inco.incoVerifier().isValidDecryptionAttestation(hitAttestation, hitSignatures), "invalid hit attestation"
         );
@@ -478,14 +568,28 @@ contract Battleship {
             inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
             "invalid win attestation"
         );
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(mineHitAttestation, mineHitSignatures),
+            "invalid mine attestation"
+        );
         require(ebool.unwrap(m.pendingHit) == hitAttestation.handle, "hit handle mismatch");
         require(ebool.unwrap(m.pendingAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
+        require(ebool.unwrap(m.pendingMineHit) == mineHitAttestation.handle, "mine handle mismatch");
 
         bool hit = asBool(hitAttestation.value);
         bool won = asBool(allDestroyedAttestation.value);
+        bool mineHit = asBool(mineHitAttestation.value);
 
-        m.shotPending = false;
-        address shooter = m.players[m.pendingShooter].addr;
+        m.pendingAction = PendingAction.None;
+        uint8 shooterIdx = m.pendingActor;
+        address shooter = m.players[shooterIdx].addr;
+
+        if (mineHit) {
+            // Grants the defender (the mine's owner) one extra action on
+            // their next turn. A mine triggers once, then this cell can
+            // never be shot again (shotsAgainstMe), so it cannot retrigger.
+            m.players[1 - shooterIdx].bonusShotAvailable = true;
+        }
 
         if (won) {
             m.phase = Phase.Finished;
@@ -493,7 +597,20 @@ contract Battleship {
             emit MatchWon(matchId, shooter);
         } else {
             if (!hit) {
-                m.turn = 1 - m.pendingShooter;
+                // A miss normally passes the turn, unless the shooter has a
+                // pending bonus action from a mine they triggered earlier,
+                // in which case it is spent here instead, and the shooter
+                // keeps the turn for one more action.
+                if (m.players[shooterIdx].bonusShotAvailable) {
+                    m.players[shooterIdx].bonusShotAvailable = false;
+                } else {
+                    m.turn = 1 - shooterIdx;
+                }
+            } else if (m.players[shooterIdx].bonusShotAvailable) {
+                // A hit already keeps the turn on its own; a pending bonus
+                // is still spent here so it cannot carry over to a later
+                // turn.
+                m.players[shooterIdx].bonusShotAvailable = false;
             }
             m.lastMoveTimestamp = block.timestamp;
         }
@@ -550,5 +667,13 @@ contract Battleship {
 
     function getShotsAgainst(uint256 matchId, uint8 playerIdx) external view returns (uint256) {
         return matches[matchId].players[playerIdx].shotsAgainstMe;
+    }
+
+    function getMineMask(uint256 matchId, uint8 playerIdx) external view returns (euint256) {
+        return matches[matchId].players[playerIdx].mineMask;
+    }
+
+    function hasBonusShot(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return matches[matchId].players[playerIdx].bonusShotAvailable;
     }
 }

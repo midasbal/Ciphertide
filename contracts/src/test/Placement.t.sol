@@ -35,7 +35,9 @@ contract PlacementTest is IncoTest {
     }
 
     function _placementFee() internal view returns (uint256) {
-        return inco.getFee() * uint256(NUM_SHIPS) * game.PLACEMENT_ATTEMPTS_PER_SHIP();
+        uint256 shipDraws = uint256(NUM_SHIPS) * game.PLACEMENT_ATTEMPTS_PER_SHIP();
+        uint256 mineDraws = uint256(game.MINES_PER_PLAYER()) * game.MINE_PLACEMENT_ATTEMPTS();
+        return inco.getFee() * (shipDraws + mineDraws);
     }
 
     /// @dev Submits a placement and confirms it, returning whether the
@@ -144,6 +146,23 @@ contract PlacementTest is IncoTest {
             assertFalse(
                 inco.isAllowed(euint256.unwrap(shipHandle), bob), "opponent must not be able to read any ship mask"
             );
+        }
+    }
+
+    function testMinesLandOnWaterOnlyAndAreNotReadableByOpponent() public {
+        for (uint256 round = 0; round < 3; round++) {
+            uint256 matchId = _createAndJoinMatch(alice, bob);
+            _placeAndConfirm(matchId, alice);
+
+            euint256 mineHandle = game.getMineMask(matchId, 0);
+            assertTrue(inco.isAllowed(euint256.unwrap(mineHandle), alice), "owner should be able to read their mines");
+            assertFalse(inco.isAllowed(euint256.unwrap(mineHandle), bob), "opponent must not be able to read the mines");
+
+            uint256 mineMask = getUint256Value(mineHandle);
+            assertEq(_popcount(mineMask), game.MINES_PER_PLAYER(), "should place exactly the configured mine count");
+
+            uint256 boardMask = getUint256Value(game.getBoardMask(matchId, 0));
+            assertEq(mineMask & boardMask, 0, "mines should never land on a ship cell");
         }
     }
 
