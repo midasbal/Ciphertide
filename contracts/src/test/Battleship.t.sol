@@ -222,6 +222,57 @@ contract BattleshipTest is IncoTest {
         console.log("shoot() gas used (hit + allDestroyed + newlyDestroyed, 3 reveals):", gasUsed);
     }
 
+    /// @dev shoot() computes the mine check unconditionally every call
+    /// (Inco ops can't branch on encrypted state), so a shot that actually
+    /// lands on a mine costs the same as any other shot. Measured
+    /// separately anyway to have a concrete number for a real mine hit.
+    function testShootGasUsageOnAMineCell() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+
+        address shooter = game.getTurn(matchId);
+        address defender = shooter == alice ? bob : alice;
+        uint8 defenderIdx = game.getPlayerAddress(matchId, 0) == defender ? 0 : 1;
+
+        game.setMinesForTesting(matchId, defenderIdx, uint256(1) << 220, defender);
+        processAllOperations();
+
+        vm.prank(shooter);
+        uint256 gasBefore = gasleft();
+        game.shoot(matchId, 220);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        console.log("shoot() gas used, mine cell:", gasUsed);
+    }
+
+    function testSonarGasUsage() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        address user = game.getTurn(matchId);
+
+        vm.prank(user);
+        uint256 gasBefore = gasleft();
+        game.useSonar(matchId, 0, 0);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        console.log("useSonar() gas used:", gasUsed);
+    }
+
+    function testBarrageGasUsage() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        address user = game.getTurn(matchId);
+
+        vm.deal(user, 1 ether);
+        uint256 fee = _barrageFee();
+        vm.prank(user);
+        uint256 gasBefore = gasleft();
+        game.useBarrage{value: fee}(matchId, 0, 0);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        console.log("useBarrage() gas used (6 slots x 8 attempts + 1 count draw):", gasUsed);
+    }
+
     function testKnownMissPassesTurn() public {
         (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
         uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
