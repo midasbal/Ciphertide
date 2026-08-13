@@ -10,7 +10,8 @@ import {CiphertideMechanics} from "./CiphertideMechanics.sol";
 /// @notice Ciphertide: an onchain hidden-fleet naval duel on Base Sepolia,
 ///         built on Inco Lightning. Encrypted fleet placement, a two phase
 ///         shoot and confirm loop, mines, the shared Sonar and Barrage
-///         skills, Captain 1's Shield, and Captain 2's Bombardment.
+///         skills, Captain 1's Shield, Captain 2's Bombardment, and
+///         Captain 3's Rake.
 /// @dev Shot resolution, turn order and win detection are built and tested
 ///      against a board state set through a test-only hook so this piece is
 ///      not blocked on the placement design decision.
@@ -78,6 +79,18 @@ contract Ciphertide {
     uint8 public constant BOMBARDMENT_ATTEMPTS_PER_CELL = 8;
     uint8 public constant BOMBARDMENT_LOCAL_POS_BITS = 7;
 
+    /// Rake: Captain 3's unique skill, one whole row (BOARD_SIZE cells wide,
+    /// a single cell tall), a fixed 3 of its 15 cells are struck. Shares
+    /// the same bounded-attempt drawing and packing machinery as Barrage
+    /// and Bombardment, with minCells equal to maxCells like Bombardment,
+    /// just over a 15x1 area instead of a square. A row has 15 cells,
+    /// needing 4 bits (up to 15) to address a local position, same width
+    /// as Barrage's.
+    uint8 public constant RAKE_ROW_LENGTH = 15;
+    uint8 public constant RAKE_STRIKE_COUNT = 3;
+    uint8 public constant RAKE_ATTEMPTS_PER_CELL = 8;
+    uint8 public constant RAKE_LOCAL_POS_BITS = 4;
+
     /// Captain identity, declared per player when entering a match. Every
     /// captain carries the two shared skills, Sonar and Barrage, plus one
     /// unique skill. This contract only records which captain a player
@@ -100,15 +113,16 @@ contract Ciphertide {
         Finished
     }
 
-    /// At most one action (a normal shot, sonar, barrage, or bombardment)
-    /// can be in flight at a time, awaiting its confirmation before the
-    /// next action is allowed.
+    /// At most one action (a normal shot, sonar, barrage, bombardment, or
+    /// rake) can be in flight at a time, awaiting its confirmation before
+    /// the next action is allowed.
     enum PendingAction {
         None,
         Shot,
         Sonar,
         Barrage,
-        Bombardment
+        Bombardment,
+        Rake
     }
 
     struct Match {
@@ -179,6 +193,10 @@ contract Ciphertide {
         bytes32 allDestroyedHandle
     );
     event BombardmentResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
+    event RakeFired(
+        uint256 indexed matchId, address indexed player, uint8 row, bytes32 packedHandle, bytes32 allDestroyedHandle
+    );
+    event RakeResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
     event ShieldPlaced(uint256 indexed matchId, address indexed player);
     event ShieldBroken(uint256 indexed matchId, address indexed owner, uint8 cell);
     event MatchWon(uint256 indexed matchId, address indexed winner);
@@ -856,14 +874,15 @@ contract Ciphertide {
         require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
 
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveAreaStrikes(
+        (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
+            m,
+            defender,
             CiphertideMechanics.AreaGeometry({
                 anchorRow: anchorRow,
                 anchorCol: anchorCol,
                 width: BARRAGE_AREA_SIZE,
                 height: BARRAGE_AREA_SIZE
             }),
-            defender,
             CiphertideMechanics.StrikeConfig({
                 minCells: BARRAGE_MIN_CELLS,
                 maxCells: BARRAGE_MAX_CELLS,
@@ -872,20 +891,7 @@ contract Ciphertide {
             })
         );
 
-        packed.allowThis();
-        allDestroyed.allowThis();
-        newlyDestroyed.allowThis();
-        e.reveal(packed);
-        e.reveal(allDestroyed);
-        e.reveal(newlyDestroyed);
-        defender.lastDestroyedMask = newlyDestroyed;
-
         m.pendingAction = PendingAction.Barrage;
-        m.pendingActor = m.turn;
-        m.pendingAreaPacked = packed;
-        m.pendingAreaAllDestroyed = allDestroyed;
-        m.pendingAreaAnchorRow = anchorRow;
-        m.pendingAreaAnchorCol = anchorCol;
 
         emit BarrageFired(
             matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
@@ -926,14 +932,15 @@ contract Ciphertide {
         require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
 
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveAreaStrikes(
+        (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
+            m,
+            defender,
             CiphertideMechanics.AreaGeometry({
                 anchorRow: anchorRow,
                 anchorCol: anchorCol,
                 width: BOMBARDMENT_AREA_SIZE,
                 height: BOMBARDMENT_AREA_SIZE
             }),
-            defender,
             CiphertideMechanics.StrikeConfig({
                 minCells: BOMBARDMENT_STRIKE_COUNT,
                 maxCells: BOMBARDMENT_STRIKE_COUNT,
@@ -941,6 +948,74 @@ contract Ciphertide {
                 positionBits: BOMBARDMENT_LOCAL_POS_BITS
             })
         );
+
+        m.pendingAction = PendingAction.Bombardment;
+
+        emit BombardmentFired(
+            matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
+        );
+    }
+
+    /// @notice Captain Rake's unique skill: strikes a fixed 3 of the 15
+    ///         cells in a caller chosen row, revealing hit or miss for each
+    ///         struck cell. Resolves exactly like Barrage and Bombardment
+    ///         in every other respect: ship hits burn cells and can sink
+    ///         ships, a struck mine still applies its penalty, and a struck
+    ///         cell that is the defender's shielded cell resolves as a
+    ///         shield break instead (no damage, the cell survives, the
+    ///         shield is consumed). Single use per match, and the player's
+    ///         whole action for the turn.
+    /// @dev Shares CiphertideMechanics.resolveAreaStrikes with Barrage and
+    ///      Bombardment, over a RAKE_ROW_LENGTH x 1 area (the whole chosen
+    ///      row) with a fixed strike count (minCells == maxCells ==
+    ///      RAKE_STRIKE_COUNT), so all 3 slots are always active.
+    ///      RAKE_LOCAL_POS_BITS (4) bits per local position, 7 bits per
+    ///      slot, see resolveAreaStrikes for the full encoding.
+    function useRake(uint256 matchId, uint8 row) external payable onlyPlayer(matchId) {
+        Match storage m = matches[matchId];
+        _beginAction(m);
+        _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_RAKE);
+        require(row < BOARD_SIZE, "invalid row");
+
+        PlayerSlot storage attacker = m.players[m.turn];
+        require(!attacker.rakeUsed, "rake already used");
+        attacker.rakeUsed = true;
+
+        uint256 totalDraws = uint256(1) + uint256(RAKE_STRIKE_COUNT) * RAKE_ATTEMPTS_PER_CELL;
+        require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
+
+        PlayerSlot storage defender = m.players[1 - m.turn];
+        (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
+            m,
+            defender,
+            CiphertideMechanics.AreaGeometry({anchorRow: row, anchorCol: 0, width: RAKE_ROW_LENGTH, height: 1}),
+            CiphertideMechanics.StrikeConfig({
+                minCells: RAKE_STRIKE_COUNT,
+                maxCells: RAKE_STRIKE_COUNT,
+                attemptsPerCell: RAKE_ATTEMPTS_PER_CELL,
+                positionBits: RAKE_LOCAL_POS_BITS
+            })
+        );
+
+        m.pendingAction = PendingAction.Rake;
+
+        emit RakeFired(matchId, msg.sender, row, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
+    }
+
+    /// @dev Shared firing step for every area-strike skill (Barrage,
+    ///      Bombardment, Rake): calls CiphertideMechanics.resolveAreaStrikes,
+    ///      allows and reveals the resulting packed value and win bit,
+    ///      records the newly destroyed mask, and stashes the pending actor
+    ///      and area fields shared across all of them. Each caller still
+    ///      sets its own m.pendingAction and emits its own Fired event
+    ///      afterward, since those differ per skill.
+    function _fireAreaStrike(
+        Match storage m,
+        PlayerSlot storage defender,
+        CiphertideMechanics.AreaGeometry memory area,
+        CiphertideMechanics.StrikeConfig memory config
+    ) internal returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) {
+        (packed, newlyDestroyed, allDestroyed) = CiphertideMechanics.resolveAreaStrikes(area, defender, config);
 
         packed.allowThis();
         allDestroyed.allowThis();
@@ -950,24 +1025,20 @@ contract Ciphertide {
         e.reveal(newlyDestroyed);
         defender.lastDestroyedMask = newlyDestroyed;
 
-        m.pendingAction = PendingAction.Bombardment;
         m.pendingActor = m.turn;
         m.pendingAreaPacked = packed;
         m.pendingAreaAllDestroyed = allDestroyed;
-        m.pendingAreaAnchorRow = anchorRow;
-        m.pendingAreaAnchorCol = anchorCol;
-
-        emit BombardmentFired(
-            matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
-        );
+        m.pendingAreaAnchorRow = area.anchorRow;
+        m.pendingAreaAnchorCol = area.anchorCol;
     }
 
-    /// @dev Decodes an area strike's packed slots (shared by Barrage and
-    ///      Bombardment, isBombardment picks which Resolved event to emit),
-    ///      marks every active slot's cell as shot except a shield break,
-    ///      and emits per-cell results. Returns whether any struck cell was
-    ///      a mine, pulled into its own function to keep confirmBarrage and
-    ///      confirmBombardment's own stack frames small.
+    /// @dev Decodes an area strike's packed slots (shared by Barrage,
+    ///      Bombardment and Rake, actionKind picks which Resolved event to
+    ///      emit), marks every active slot's cell as shot except a shield
+    ///      break, and emits per-cell results. Returns whether any struck
+    ///      cell was a mine, pulled into its own function to keep
+    ///      confirmBarrage, confirmBombardment and confirmRake's own stack
+    ///      frames small.
     function _applyAreaResults(
         uint256 matchId,
         PlayerSlot storage defender,
@@ -977,7 +1048,7 @@ contract Ciphertide {
         uint8 width,
         uint8 maxCells,
         uint8 positionBits,
-        bool isBombardment
+        PendingAction actionKind
     ) internal returns (bool anyMineTriggered) {
         uint256 slotBits = uint256(positionBits) + 3;
         uint256 slotMask = (uint256(1) << slotBits) - 1;
@@ -1006,8 +1077,10 @@ contract Ciphertide {
             }
             // A mine cell always reads as a miss, a ship hit or a shield
             // break are the only codes that report anything else.
-            if (isBombardment) {
+            if (actionKind == PendingAction.Bombardment) {
                 emit BombardmentResolved(matchId, globalCell, code == 2, code == 3, code == 4);
+            } else if (actionKind == PendingAction.Rake) {
+                emit RakeResolved(matchId, globalCell, code == 2, code == 3, code == 4);
             } else {
                 emit BarrageResolved(matchId, globalCell, code == 2, code == 3, code == 4);
             }
@@ -1084,7 +1157,7 @@ contract Ciphertide {
             BARRAGE_AREA_SIZE,
             BARRAGE_MAX_CELLS,
             BARRAGE_LOCAL_POS_BITS,
-            false
+            PendingAction.Barrage
         );
 
         _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
@@ -1132,7 +1205,56 @@ contract Ciphertide {
             BOMBARDMENT_AREA_SIZE,
             BOMBARDMENT_STRIKE_COUNT,
             BOMBARDMENT_LOCAL_POS_BITS,
-            true
+            PendingAction.Bombardment
+        );
+
+        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
+    }
+
+    /// @notice Confirms a pending rake: marks every struck cell as shot,
+    ///         applies the single non-stacking mine bonus if any struck
+    ///         cell was a mine, resolves a shield break if the defender's
+    ///         shielded cell was struck, and resolves the win or turn pass.
+    ///         Rake is the player's whole action for the turn, exactly like
+    ///         Barrage and Bombardment.
+    /// @dev If a rake happens to cover both of the defender's mines in one
+    ///      action, both attest as code 3, but the bonus flag below is only
+    ///      ever set to true, never incremented, so the owner still gets
+    ///      exactly one extra action, not two, matching Barrage and
+    ///      Bombardment.
+    function confirmRake(
+        uint256 matchId,
+        DecryptionAttestation memory packedAttestation,
+        bytes[] memory packedSignatures,
+        DecryptionAttestation memory allDestroyedAttestation,
+        bytes[] memory allDestroyedSignatures
+    ) external {
+        Match storage m = matches[matchId];
+        require(m.pendingAction == PendingAction.Rake, "no pending rake");
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
+            "invalid rake attestation"
+        );
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
+            "invalid win attestation"
+        );
+        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "rake handle mismatch");
+        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
+
+        uint8 actorIdx = m.pendingActor;
+        PlayerSlot storage defender = m.players[1 - actorIdx];
+        bool won = asBool(allDestroyedAttestation.value);
+        bool anyMineTriggered = _applyAreaResults(
+            matchId,
+            defender,
+            uint256(packedAttestation.value),
+            m.pendingAreaAnchorRow,
+            m.pendingAreaAnchorCol,
+            RAKE_ROW_LENGTH,
+            RAKE_STRIKE_COUNT,
+            RAKE_LOCAL_POS_BITS,
+            PendingAction.Rake
         );
 
         _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
@@ -1211,6 +1333,10 @@ contract Ciphertide {
 
     function hasBombardmentCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
         return !matches[matchId].players[playerIdx].bombardmentUsed;
+    }
+
+    function hasRakeCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return !matches[matchId].players[playerIdx].rakeUsed;
     }
 
     function hasShieldCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {

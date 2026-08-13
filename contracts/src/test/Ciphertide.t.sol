@@ -74,6 +74,37 @@ contract CiphertideTest is IncoTest {
         _rollAndConfirmDiceUntilDecided(matchId, p0);
     }
 
+    /// @dev Same as _createAndJoinMatch but with caller chosen captains,
+    /// needed whenever a test cares about a captain other than the fixed
+    /// CAPTAIN_SHIELD/CAPTAIN_BOMBARDMENT pair _createAndJoinMatch declares.
+    function _createAndJoinMatchWithCaptains(address p0, address p1, uint8 p0Captain, uint8 p1Captain)
+        internal
+        returns (uint256 matchId)
+    {
+        vm.prank(p0);
+        matchId = game.createMatch(p0Captain);
+        vm.prank(p1);
+        game.joinMatch(matchId, p1Captain);
+    }
+
+    /// @dev Same as _setupInProgressMatch but with caller chosen captains.
+    function _setupInProgressMatchWithCaptains(
+        address p0,
+        address p1,
+        uint8 p0Captain,
+        uint8 p1Captain,
+        uint256 board0,
+        uint256[6] memory ships0
+    ) internal returns (uint256 matchId) {
+        matchId = _createAndJoinMatchWithCaptains(p0, p1, p0Captain, p1Captain);
+        (uint256 board1, uint256[6] memory ships1) = _tinyShipsBoard();
+        game.setBoardForTesting(matchId, 0, board0, ships0);
+        game.setBoardForTesting(matchId, 1, board1, ships1);
+        processAllOperations();
+
+        _rollAndConfirmDiceUntilDecided(matchId, p0);
+    }
+
     function _rollAndConfirmDiceUntilDecided(uint256 matchId, address p0) internal {
         uint256 diceFee = inco.getFee() * 2;
         for (uint256 attempts = 0; attempts < 10; attempts++) {
@@ -126,6 +157,17 @@ contract CiphertideTest is IncoTest {
             requester, HandleWithProof({handle: allDestroyedHandle, proof: _emptyAllowanceProof()})
         );
         game.confirmBombardment(matchId, packedAtt, packedSigs, winAtt, winSigs);
+        packedValue = uint256(packedAtt.value);
+    }
+
+    function _confirmPendingRake(uint256 matchId, address requester) internal returns (uint256 packedValue) {
+        (bytes32 packedHandle, bytes32 allDestroyedHandle) = game.getPendingAreaHandles(matchId);
+        (DecryptionAttestation memory packedAtt, bytes[] memory packedSigs) =
+            getDecryptionAttestation(requester, HandleWithProof({handle: packedHandle, proof: _emptyAllowanceProof()}));
+        (DecryptionAttestation memory winAtt, bytes[] memory winSigs) = getDecryptionAttestation(
+            requester, HandleWithProof({handle: allDestroyedHandle, proof: _emptyAllowanceProof()})
+        );
+        game.confirmRake(matchId, packedAtt, packedSigs, winAtt, winSigs);
         packedValue = uint256(packedAtt.value);
     }
 
@@ -385,6 +427,25 @@ contract CiphertideTest is IncoTest {
         console.log("useBombardment() gas used (15 slots x 8 attempts + 1 count draw):", gasUsed);
     }
 
+    function testRakeGasUsage() public {
+        uint8 rakeCaptain = game.CAPTAIN_RAKE();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, rakeCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        vm.deal(alice, 1 ether);
+        uint256 fee = _rakeFee();
+        vm.prank(alice);
+        uint256 gasBefore = gasleft();
+        game.useRake{value: fee}(matchId, 0);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        console.log("useRake() gas used (3 slots x 8 attempts + 1 count draw):", gasUsed);
+    }
+
     function testKnownMissPassesTurn() public {
         (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
         uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
@@ -620,6 +681,11 @@ contract CiphertideTest is IncoTest {
     function _bombardmentFee() internal view returns (uint256) {
         uint256 draws =
             uint256(1) + uint256(game.BOMBARDMENT_STRIKE_COUNT()) * game.BOMBARDMENT_ATTEMPTS_PER_CELL();
+        return inco.getFee() * draws;
+    }
+
+    function _rakeFee() internal view returns (uint256) {
+        uint256 draws = uint256(1) + uint256(game.RAKE_STRIKE_COUNT()) * game.RAKE_ATTEMPTS_PER_CELL();
         return inco.getFee() * draws;
     }
 
@@ -1352,5 +1418,272 @@ contract CiphertideTest is IncoTest {
         }
 
         assertTrue(observedBreak, "expected at least one bombardment to strike the shielded cell");
+    }
+
+    // Rake: Captain 3's unique skill. Neither alice nor bob is
+    // CAPTAIN_RAKE in _createAndJoinMatch, so these tests declare their
+    // own captains via _setupInProgressMatchWithCaptains, with alice as
+    // CAPTAIN_RAKE and the attacker unless stated otherwise.
+
+    function testRakeStrikesThreeDistinctCellsInRowAndRevealsEach() public {
+        uint8 rakeCaptain = game.CAPTAIN_RAKE();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, rakeCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        vm.deal(alice, 1 ether);
+        uint256 fee = _rakeFee();
+        vm.prank(alice);
+        game.useRake{value: fee}(matchId, 0);
+        processAllOperations();
+        uint256 packed = _confirmPendingRake(matchId, alice);
+
+        uint256 activeCount = 0;
+        uint256 seenPositions = 0;
+        uint256 posBits = game.RAKE_LOCAL_POS_BITS();
+        uint256 slotBits = posBits + 3;
+        uint256 posMask = (uint256(1) << posBits) - 1;
+        for (uint8 k = 0; k < game.RAKE_STRIKE_COUNT(); k++) {
+            uint256 code = _decodeAreaSlot(packed, k, uint8(posBits));
+            if (code == 0) continue;
+            activeCount++;
+            uint256 localPos = (packed >> (uint256(k) * slotBits)) & posMask;
+            assertTrue(localPos < 15, "a rake local position should always be inside the 15 cell row");
+            assertEq(seenPositions & (uint256(1) << localPos), 0, "every struck local position should be distinct");
+            seenPositions |= (uint256(1) << localPos);
+        }
+        assertEq(activeCount, game.RAKE_STRIKE_COUNT(), "rake should always strike exactly 3 cells");
+    }
+
+    function testRakeConsumesChargeAndPassesTurn() public {
+        uint8 rakeCaptain = game.CAPTAIN_RAKE();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, rakeCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 aliceIdx = game.getPlayerAddress(matchId, 0) == alice ? 0 : 1;
+
+        vm.deal(alice, 1 ether);
+        uint256 fee = _rakeFee();
+        vm.prank(alice);
+        game.useRake{value: fee}(matchId, 0);
+        processAllOperations();
+        _confirmPendingRake(matchId, alice);
+
+        assertEq(game.getTurn(matchId), bob, "rake is the whole action for the turn, it should pass");
+        assertFalse(game.hasRakeCharge(matchId, aliceIdx), "rake's single charge should now be spent");
+
+        // Pass the turn back so it is alice's turn again before checking reuse.
+        vm.prank(bob);
+        game.shoot(matchId, 224);
+        processAllOperations();
+        _confirmPendingShot(matchId, bob);
+        assertEq(game.getTurn(matchId), alice);
+
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert("rake already used");
+        game.useRake{value: fee}(matchId, 1);
+    }
+
+    function testOnlyCaptainRakeCanUseIt() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        // alice is CAPTAIN_SHIELD and bob is CAPTAIN_BOMBARDMENT in
+        // _createAndJoinMatch, neither is rake.
+        address turnPlayer = game.getTurn(matchId);
+
+        uint256 fee = _rakeFee();
+        vm.deal(turnPlayer, 1 ether);
+        vm.prank(turnPlayer);
+        vm.expectRevert("captain does not own this skill");
+        game.useRake{value: fee}(matchId, 0);
+    }
+
+    function testRakeRevertsOnInvalidRow() public {
+        uint8 rakeCaptain = game.CAPTAIN_RAKE();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, rakeCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        // BOARD_SIZE is 15, so row 15 is one past the last valid row (0-14).
+        uint256 fee = _rakeFee();
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert("invalid row");
+        game.useRake{value: fee}(matchId, 15);
+    }
+
+    /// @dev Rake can sink a ship and win exactly like Barrage and
+    /// Bombardment. Cells 0-4 (five of the tiny ships board's six single-
+    /// cell ships, all in row 0) are sunk with plain shots first, each a
+    /// hit that keeps the shooter's turn, so the match's outcome rests
+    /// entirely on whether the same rake that then aims at row 0 happens to
+    /// strike cell 5: with a fixed 3 of 15 row cells struck, the chance of
+    /// any one specific cell being included is 20%, so this retries across
+    /// fresh matches until it happens, the same pattern the other
+    /// probabilistic area tests use.
+    function testRakeCanSinkShipAndWin() public {
+        uint8 rakeCaptain = game.CAPTAIN_RAKE();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board1, uint256[6] memory ships1) = _tinyShipsBoard();
+        bool won = false;
+        for (uint256 round = 0; round < 30 && !won; round++) {
+            uint256 matchId =
+                _setupInProgressMatchWithCaptains(alice, bob, rakeCaptain, shieldCaptain, board1, ships1);
+            if (game.getTurn(matchId) != alice) {
+                _passTurnWithMiss(matchId, bob, 200);
+            }
+
+            for (uint8 cell = 0; cell < 5; cell++) {
+                vm.prank(alice);
+                game.shoot(matchId, cell);
+                processAllOperations();
+                _confirmPendingShot(matchId, alice);
+            }
+            assertEq(game.getTurn(matchId), alice, "five hits in a row should keep alice's turn");
+
+            vm.deal(alice, 1 ether);
+            uint256 fee = _rakeFee();
+            vm.prank(alice);
+            // Row 0 covers cell 5 (row 0, col 5) among the other 14 cells.
+            game.useRake{value: fee}(matchId, 0);
+            processAllOperations();
+            _confirmPendingRake(matchId, alice);
+
+            if (game.getPhase(matchId) != Ciphertide.Phase.Finished) continue;
+            won = true;
+
+            assertEq(
+                game.getWinner(matchId), alice, "alice should win once the last ship is struck by the rake"
+            );
+        }
+
+        assertTrue(won, "expected at least one rake to strike the last remaining ship cell and win");
+    }
+
+    /// @dev Seeds the real two mines inside the targeted row (outside the
+    /// tiny ships board's six ship cells) and retries across fresh matches
+    /// until the rake strikes at least one of them, then confirms exactly
+    /// one bonus action is granted, the same no-stacking rule Barrage and
+    /// Bombardment use.
+    function testRakeMinePenaltyGrantsExactlyOneBonus() public {
+        uint8 rakeCaptain = game.CAPTAIN_RAKE();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
+        uint256 mineMask = (uint256(1) << 7) | (uint256(1) << 8);
+
+        bool sawMine = false;
+        for (uint256 round = 0; round < 30 && !sawMine; round++) {
+            uint256 matchId =
+                _setupInProgressMatchWithCaptains(alice, bob, rakeCaptain, shieldCaptain, board0, ships0);
+            if (game.getTurn(matchId) != alice) {
+                _passTurnWithMiss(matchId, bob, 200);
+            }
+            uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
+            game.setMinesForTesting(matchId, bobIdx, mineMask, bob);
+            processAllOperations();
+
+            vm.deal(alice, 1 ether);
+            uint256 fee = _rakeFee();
+            vm.prank(alice);
+            game.useRake{value: fee}(matchId, 0);
+            processAllOperations();
+            uint256 packed = _confirmPendingRake(matchId, alice);
+
+            bool foundMine = false;
+            for (uint8 k = 0; k < game.RAKE_STRIKE_COUNT(); k++) {
+                if (_decodeAreaSlot(packed, k, game.RAKE_LOCAL_POS_BITS()) == 3) foundMine = true;
+            }
+            if (!foundMine) continue;
+            sawMine = true;
+
+            assertTrue(game.hasBonusShot(matchId, bobIdx), "striking a mine should grant the owner a bonus");
+        }
+
+        assertTrue(sawMine, "expected at least one rake to strike a mine cell");
+    }
+
+    /// @dev A rake that strikes the shielded cell breaks it exactly once
+    /// (no damage, cell survives, shield consumed), mirroring
+    /// testBombardmentBreaksShieldOnceWithoutDestroyingShip but over Rake's
+    /// row shaped area and fixed 3 cell count.
+    function testRakeBreaksShieldOnceWithoutDestroyingShip() public {
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        uint8 rakeCaptain = game.CAPTAIN_RAKE();
+        bool observedBreak = false;
+        for (uint256 round = 0; round < 30 && !observedBreak; round++) {
+            // Cells 0-5 are all real single-cell ships on the tiny ships
+            // board, and all fall within row 0. Rotated per round for the
+            // same ciphertext-collision reason
+            // testBarrageBreaksShieldOnceWithoutDestroyingShip documents.
+            uint8 cellIdx = uint8(round % 6);
+
+            (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
+            uint256 matchId =
+                _setupInProgressMatchWithCaptains(alice, bob, shieldCaptain, rakeCaptain, board0, ships0);
+            if (game.getTurn(matchId) != alice) {
+                _passTurnWithMiss(matchId, bob, 200);
+            }
+
+            _placeShield(matchId, alice, cellIdx);
+            processAllOperations();
+
+            // Hand the turn to bob so he can fire the rake at alice's
+            // board. Cell 100 is water on both test boards.
+            _passTurnWithMiss(matchId, alice, 100);
+
+            vm.deal(bob, 1 ether);
+            uint256 fee = _rakeFee();
+            vm.prank(bob);
+            game.useRake{value: fee}(matchId, 0);
+            processAllOperations();
+            uint256 packed = _confirmPendingRake(matchId, bob);
+
+            uint256 breakCount = 0;
+            bool shieldedCellWasBreak = false;
+            uint256 posBits = game.RAKE_LOCAL_POS_BITS();
+            uint256 slotBits = posBits + 3;
+            uint256 posMask = (uint256(1) << posBits) - 1;
+            for (uint8 k = 0; k < game.RAKE_STRIKE_COUNT(); k++) {
+                uint256 code = _decodeAreaSlot(packed, k, uint8(posBits));
+                if (code != 4) continue;
+                breakCount++;
+                uint256 localPos = (packed >> (uint256(k) * slotBits)) & posMask;
+                if (localPos == cellIdx) shieldedCellWasBreak = true;
+            }
+            if (!shieldedCellWasBreak) continue;
+            observedBreak = true;
+
+            assertEq(breakCount, 1, "the shield covers exactly one cell, at most one rake slot can break it");
+            assertFalse(game.isShieldActive(matchId, 0), "the shield should be consumed by the rake break");
+
+            uint256 revealed = getUint256Value(game.getLastDestroyedMask(matchId, 0));
+            assertEq(revealed & (uint256(1) << cellIdx), 0, "the shield break must not sink the ship it is guarding");
+            assertEq(
+                game.getShotsAgainst(matchId, 0) & (uint256(1) << cellIdx), 0, "a shield break must not burn the cell"
+            );
+
+            _passTurnWithMiss(matchId, alice, 101);
+            assertEq(game.getTurn(matchId), bob, "turn should have passed back to bob");
+
+            vm.prank(bob);
+            game.shoot(matchId, cellIdx);
+            processAllOperations();
+            (bool hit, bool shieldBreak) = _confirmPendingShot(matchId, bob);
+
+            assertTrue(hit, "the cell should now resolve as a real hit, the shield is already gone");
+            assertFalse(shieldBreak, "the shield cannot break twice");
+        }
+
+        assertTrue(observedBreak, "expected at least one rake to strike the shielded cell");
     }
 }
