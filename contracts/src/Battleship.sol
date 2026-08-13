@@ -4,6 +4,8 @@ pragma solidity ^0.8.29;
 import {euint256, ebool, e, inco} from "@inco/lightning/src/Lib.sol";
 import {DecryptionAttestation} from "@inco/lightning/src/lightning-parts/DecryptionAttester.types.sol";
 import {asBool} from "@inco/lightning/src/shared/TypeUtils.sol";
+import {PlayerSlot} from "./BattleshipTypes.sol";
+import {BattleshipMechanics} from "./BattleshipMechanics.sol";
 
 /// @notice Core 1v1 onchain Battleship loop on Base Sepolia, built on Inco
 ///         Lightning. Step 1 scope only: a single core match loop, no mines,
@@ -81,34 +83,6 @@ contract Battleship {
         AwaitingDiceRoll,
         InProgress,
         Finished
-    }
-
-    struct PlayerSlot {
-        address addr;
-        uint8 captain; // declared at createMatch or joinMatch, one of the NUM_CAPTAINS ids
-        bool placed;
-        euint256 boardMask; // OR of all shipMask entries, one bit per cell
-        euint256[NUM_SHIPS] shipMask; // cells occupied by each ship, disjoint
-        euint256[NUM_SHIPS] shipHits; // subset of shipMask hit so far
-        euint256 lastDestroyedMask; // the ship (if any) sunk by the most recent shot, else 0, always safe to reveal
-        euint256 mineMask; // this player's own mines, never allowed to the opponent
-        uint256 shotsAgainstMe; // plain bitmask, cells already shot at on this board
-        uint256 remainingTime;
-        bool placementPending;
-        ebool pendingAllPlaced;
-        bool bonusShotAvailable; // set when the opponent triggers one of this player's mines
-        bool sonarUsed;
-        bool barrageUsed;
-        bool shieldUsed; // gates placeShield to once per match, captain 1 only
-        euint256 shieldCellMask; // encrypted single-bit mask of the shielded cell, 0 if none or invalid
-        // Public on purpose: whether a shield has been committed is not a
-        // secret, only the CELL it guards is. True once placeShield has run,
-        // even for an invalid pick, since an invalid pick's shieldCellMask
-        // is obliviously zeroed and can therefore never match a real shot,
-        // leaving it silently, permanently inert without needing a second
-        // encrypted flag. Cleared back to false the moment the shield
-        // breaks.
-        bool shieldActive;
     }
 
     /// At most one action (a normal shot, sonar, or barrage) can be in
@@ -256,7 +230,8 @@ contract Battleship {
         euint256[NUM_SHIPS] memory shipMasks;
 
         for (uint8 i = 0; i < NUM_SHIPS; i++) {
-            (euint256 shipMask, ebool placedThisShip) = _placeOneShip(SHIP_LENGTHS[i], occupied);
+            (euint256 shipMask, ebool placedThisShip) =
+                BattleshipMechanics.placeOneShip(SHIP_LENGTHS[i], occupied, PLACEMENT_ATTEMPTS_PER_SHIP);
             // shipMask is still the trivial zero handle whenever no attempt
             // succeeded, so folding it into occupied is always safe.
             occupied = occupied.or(shipMask);
@@ -267,7 +242,8 @@ contract Battleship {
         // Mines are placed after the fleet, avoiding every ship cell, so
         // they land on water only. They must never be allowed to the
         // opponent, only to this contract and the owner.
-        (euint256 mineMask, ebool allMinesPlaced) = _placeMines(occupied);
+        (euint256 mineMask, ebool allMinesPlaced) =
+            BattleshipMechanics.placeMines(occupied, MINES_PER_PLAYER, MINE_PLACEMENT_ATTEMPTS);
         allPlaced = allPlaced.and(allMinesPlaced);
 
         occupied.allowThis();
@@ -302,96 +278,6 @@ contract Battleship {
         p.pendingAllPlaced = allPlaced;
 
         emit PlacementSubmitted(matchId, msg.sender, ebool.unwrap(allPlaced));
-    }
-
-    /// @dev Places MINES_PER_PLAYER single-cell mines, each with
-    ///      MINE_PLACEMENT_ATTEMPTS independent random candidate cells,
-    ///      avoiding every ship cell (shipOccupied) and every previously
-    ///      placed mine this call. Same bounded-attempt, first-non-
-    ///      overlapping-candidate-wins pattern as ship placement, scoped to
-    ///      a single cell instead of a run.
-    function _placeMines(euint256 shipOccupied) internal returns (euint256 mineMask, ebool allPlaced) {
-        mineMask = e.asEuint256(uint256(0));
-        allPlaced = e.asEbool(true);
-        euint256 avoid = shipOccupied;
-
-        for (uint8 i = 0; i < MINES_PER_PLAYER; i++) {
-            ebool placedThisMine = e.asEbool(false);
-            euint256 thisMineMask = e.asEuint256(uint256(0));
-
-            for (uint8 attempt = 0; attempt < MINE_PLACEMENT_ATTEMPTS; attempt++) {
-                euint256 idx = e.randBounded(uint256(BOARD_CELLS));
-                euint256 candidate = e.asEuint256(uint256(1)).shl(idx);
-
-                ebool noOverlap = candidate.and(avoid).eq(uint256(0));
-                ebool accept = placedThisMine.not().and(noOverlap);
-
-                avoid = accept.select(avoid.or(candidate), avoid);
-                thisMineMask = accept.select(candidate, thisMineMask);
-                placedThisMine = placedThisMine.or(accept);
-            }
-
-            mineMask = mineMask.or(thisMineMask);
-            allPlaced = allPlaced.and(placedThisMine);
-        }
-    }
-
-    /// @dev Tries PLACEMENT_ATTEMPTS_PER_SHIP independent random candidate
-    ///      slots for one ship of the given length against the cells already
-    ///      occupied by previously placed ships, keeping the first
-    ///      non-overlapping candidate. Every intermediate value (the random
-    ///      draw, decoded row/col/orientation, candidate mask, overlap
-    ///      check) is an encrypted handle end to end, nothing plaintext ever
-    ///      leaves this function.
-    function _placeOneShip(uint8 length, euint256 occupiedSoFar) internal returns (euint256 shipMask, ebool placed) {
-        uint256 span = uint256(BOARD_SIZE) - length + 1; // valid start offsets along one axis
-        uint256 slotsPerOrientation = uint256(BOARD_SIZE) * span;
-        uint256 totalSlots = slotsPerOrientation * 2;
-
-        shipMask = e.asEuint256(uint256(0));
-        placed = e.asEbool(false);
-
-        for (uint8 attempt = 0; attempt < PLACEMENT_ATTEMPTS_PER_SHIP; attempt++) {
-            euint256 idx = e.randBounded(totalSlots);
-            euint256 candidate = _decodeCandidateMask(idx, length, span, slotsPerOrientation);
-
-            ebool noOverlap = candidate.and(occupiedSoFar).eq(uint256(0));
-            ebool accept = placed.not().and(noOverlap);
-
-            occupiedSoFar = accept.select(occupiedSoFar.or(candidate), occupiedSoFar);
-            shipMask = accept.select(candidate, shipMask);
-            placed = placed.or(accept);
-        }
-    }
-
-    /// @dev Decodes one random draw into a candidate ship mask: orientation,
-    ///      row and column all stay encrypted, only the ship length, span
-    ///      and slot count (public config, not board state) are plaintext.
-    function _decodeCandidateMask(euint256 idx, uint8 length, uint256 span, uint256 slotsPerOrientation)
-        internal
-        returns (euint256)
-    {
-        ebool isVertical = idx.div(slotsPerOrientation).eq(uint256(1));
-        euint256 slot = idx.rem(slotsPerOrientation);
-
-        // Horizontal: row in [0, BOARD_SIZE), col in [0, span), a
-        // contiguous run of `length` bits starting at row*BOARD_SIZE+col.
-        euint256 baseH = slot.div(span).mul(uint256(BOARD_SIZE)).add(slot.rem(span));
-        euint256 maskH = e.asEuint256((uint256(1) << length) - 1).shl(baseH);
-
-        // Vertical: row in [0, span), col in [0, BOARD_SIZE), cells are
-        // BOARD_SIZE bits apart instead of contiguous.
-        euint256 baseV = slot.div(uint256(BOARD_SIZE)).mul(uint256(BOARD_SIZE)).add(slot.rem(uint256(BOARD_SIZE)));
-        euint256 maskV = _verticalRunMask(baseV, length);
-
-        return isVertical.select(maskV, maskH);
-    }
-
-    function _verticalRunMask(euint256 baseBit, uint8 length) internal returns (euint256 mask) {
-        mask = e.asEuint256(uint256(0));
-        for (uint8 k = 0; k < length; k++) {
-            mask = mask.or(e.asEuint256(uint256(1)).shl(baseBit.add(uint256(k) * BOARD_SIZE)));
-        }
     }
 
     /// @notice Confirms a submitted placement, or leaves it unplaced so the
@@ -869,7 +755,7 @@ contract Battleship {
         attacker.sonarUsed = true;
 
         PlayerSlot storage defender = m.players[1 - m.turn];
-        uint256 areaMask = _rectMask(anchorRow, anchorCol, SONAR_AREA_SIZE, SONAR_AREA_SIZE);
+        uint256 areaMask = BattleshipMechanics.rectMask(anchorRow, anchorCol, SONAR_AREA_SIZE, SONAR_AREA_SIZE);
 
         ebool anyShip = defender.boardMask.and(areaMask).ne(uint256(0));
         anyShip.allowThis();
@@ -908,17 +794,6 @@ contract Battleship {
         emit SonarResolved(matchId, anyShip, m.players[m.turn].addr);
     }
 
-    /// @dev Plaintext mask for a height x width rectangle anchored at
-    ///      (row0, col0) on the BOARD_SIZE x BOARD_SIZE board. Pure
-    ///      arithmetic, no encrypted values involved, since the area itself
-    ///      is a public choice, only its contents are confidential.
-    function _rectMask(uint8 row0, uint8 col0, uint8 height, uint8 width) internal pure returns (uint256 mask) {
-        uint256 rowRun = (uint256(1) << width) - 1;
-        for (uint8 r = 0; r < height; r++) {
-            mask |= rowRun << ((uint256(row0) + r) * BOARD_SIZE + col0);
-        }
-    }
-
     /// @notice Strikes a random 4 to 6 of the 16 cells in a caller chosen
     ///         4x4 area, revealing hit or miss for each struck cell. Ship
     ///         hits burn cells and can sink ships exactly like a normal
@@ -952,8 +827,15 @@ contract Battleship {
         require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
 
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
-            _resolveBarrageStrikes(anchorRow, anchorCol, defender);
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = BattleshipMechanics.resolveBarrageStrikes(
+            anchorRow,
+            anchorCol,
+            defender,
+            BARRAGE_AREA_SIZE,
+            BARRAGE_MIN_CELLS,
+            BARRAGE_MAX_CELLS,
+            BARRAGE_ATTEMPTS_PER_CELL
+        );
 
         packed.allowThis();
         allDestroyed.allowThis();
@@ -973,170 +855,6 @@ contract Battleship {
         emit BarrageFired(
             matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
         );
-    }
-
-    /// @dev Draws the random count, picks all six candidate slots, and
-    ///      folds the resulting struck cells into ship hit tracking. Unlike
-    ///      a normal shot, whether the shield broke is not resolved here:
-    ///      it stays folded into the per-slot packed code (shield break is
-    ///      its own code, see _barrageResultCode) and is only acted on once
-    ///      that code is decoded back to plaintext in confirmBarrage.
-    ///      Pulled out of useBarrage to keep its own stack frame small.
-    function _resolveBarrageStrikes(uint8 anchorRow, uint8 anchorCol, PlayerSlot storage defender)
-        internal
-        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
-    {
-        euint256 struckMask;
-        (packed, struckMask) = _pickAllBarrageSlots(anchorRow, anchorCol, defender);
-        (newlyDestroyed, allDestroyed) = _applyBarrageShipDamage(defender, struckMask);
-    }
-
-    /// @dev Draws the random count and picks all six candidate slots.
-    ///      Pulled out of _resolveBarrageStrikes to keep its stack frame
-    ///      small.
-    function _pickAllBarrageSlots(uint8 anchorRow, uint8 anchorCol, PlayerSlot storage defender)
-        internal
-        returns (euint256 packed, euint256 struckMask)
-    {
-        euint256 count = e.randBounded(uint256(3)).add(uint256(4));
-        euint256 avoid = e.asEuint256(defender.shotsAgainstMe);
-        struckMask = e.asEuint256(uint256(0));
-        packed = e.asEuint256(uint256(0));
-
-        for (uint8 k = 0; k < BARRAGE_MAX_CELLS; k++) {
-            ebool isActive = k < BARRAGE_MIN_CELLS ? e.asEbool(true) : count.gt(uint256(k));
-            BarrageSlotResult memory r = _pickBarrageSlot(anchorRow, anchorCol, k, isActive, avoid, defender);
-            avoid = r.newAvoid;
-            packed = packed.or(r.packedSlot);
-            struckMask = struckMask.or(r.struckContribution);
-        }
-    }
-
-    /// @dev Bundles one barrage slot's outputs into memory instead of three
-    ///      separate stack return values, keeping _pickAllBarrageSlots'
-    ///      stack frame within the EVM's local variable limit.
-    struct BarrageSlotResult {
-        euint256 newAvoid;
-        euint256 packedSlot;
-        euint256 struckContribution;
-    }
-
-    /// @dev Folds the struck cells into each ship's hit tracking and
-    ///      computes the newly sunk mask and win bit, the same pattern as
-    ///      a normal shot but against a multi-bit struck mask instead of a
-    ///      single cell.
-    function _applyBarrageShipDamage(PlayerSlot storage defender, euint256 struckMask)
-        internal
-        returns (euint256 newlyDestroyed, ebool allDestroyed)
-    {
-        allDestroyed = e.asEbool(true);
-        newlyDestroyed = e.asEuint256(uint256(0));
-        euint256 shipStruckMask = struckMask.and(defender.boardMask);
-        for (uint8 i = 0; i < NUM_SHIPS; i++) {
-            euint256 oldHits = defender.shipHits[i];
-            ebool wasAlreadyDestroyed = oldHits.eq(defender.shipMask[i]);
-
-            euint256 newHits = oldHits.or(defender.shipMask[i].and(shipStruckMask));
-            newHits.allowThis();
-            defender.shipHits[i] = newHits;
-
-            ebool destroyed = newHits.eq(defender.shipMask[i]);
-            allDestroyed = allDestroyed.and(destroyed);
-
-            ebool justSunk = destroyed.and(wasAlreadyDestroyed.not());
-            newlyDestroyed = newlyDestroyed.or(justSunk.select(defender.shipMask[i], e.asEuint256(uint256(0))));
-        }
-    }
-
-    /// @dev Tries BARRAGE_ATTEMPTS_PER_CELL independent random cells within
-    ///      the 4x4 area for one barrage slot, avoiding every cell already
-    ///      claimed by an earlier slot this barrage or already shot on a
-    ///      previous action, keeping the first non-overlapping candidate.
-    ///      Packs the local position and a result code (0 if this slot
-    ///      never found a free candidate or the random count did not reach
-    ///      it, 1 miss, 2 ship hit, 3 mine, 4 shield break) into one 7 bit
-    ///      value: 4 bit local position plus a 3 bit code, wide enough for
-    ///      the shield break code added on top of the original 2 bit range.
-    function _pickBarrageSlot(
-        uint8 anchorRow,
-        uint8 anchorCol,
-        uint8 slotIndex,
-        ebool isActive,
-        euint256 avoidSoFar,
-        PlayerSlot storage defender
-    ) internal returns (BarrageSlotResult memory r) {
-        euint256 localPos;
-        euint256 candidateMask;
-        ebool found;
-        (r.newAvoid, localPos, candidateMask, found) = _findDistinctBarrageCell(anchorRow, anchorCol, avoidSoFar);
-
-        ebool trulyActive = isActive.and(found);
-        // Same shield check as a normal shot, against this slot's candidate
-        // cell instead of a caller-supplied cell index. Whether a shield is
-        // active at all is a plain bool, so the encrypted equality check
-        // only needs to run when one is actually up.
-        ebool shieldBreak = defender.shieldActive ? trulyActive.and(candidateMask.eq(defender.shieldCellMask)) : e.asEbool(false);
-        euint256 code = _barrageResultCode(trulyActive, shieldBreak, candidateMask, defender.mineMask, defender.boardMask);
-
-        r.packedSlot = localPos.or(code.shl(uint256(4))).shl(uint256(slotIndex) * 7);
-        // A broken shield does no damage, exactly like it never happened,
-        // so its contribution to the aggregate struck mask is zeroed here
-        // even though the slot itself was truly active.
-        ebool countsAsStruck = trulyActive.and(shieldBreak.not());
-        r.struckContribution = countsAsStruck.select(candidateMask, e.asEuint256(uint256(0)));
-    }
-
-    /// @dev Runs the bounded-attempt retry to find one cell in the 4x4 area
-    ///      distinct from every cell in avoidSoFar, split out to keep
-    ///      _pickBarrageSlot's stack frame small.
-    function _findDistinctBarrageCell(uint8 anchorRow, uint8 anchorCol, euint256 avoidSoFar)
-        internal
-        returns (euint256 newAvoid, euint256 localPos, euint256 candidateMask, ebool found)
-    {
-        localPos = e.asEuint256(uint256(0));
-        candidateMask = e.asEuint256(uint256(0));
-        found = e.asEbool(false);
-
-        for (uint8 attempt = 0; attempt < BARRAGE_ATTEMPTS_PER_CELL; attempt++) {
-            euint256 idx = e.randBounded(uint256(BARRAGE_AREA_SIZE) * uint256(BARRAGE_AREA_SIZE));
-            euint256 candidateBit = e.asEuint256(uint256(1)).shl(_localToGlobalCell(idx, anchorRow, anchorCol));
-
-            ebool accept = found.not().and(candidateBit.and(avoidSoFar).eq(uint256(0)));
-
-            avoidSoFar = accept.select(avoidSoFar.or(candidateBit), avoidSoFar);
-            localPos = accept.select(idx, localPos);
-            candidateMask = accept.select(candidateBit, candidateMask);
-            found = found.or(accept);
-        }
-        newAvoid = avoidSoFar;
-    }
-
-    /// @dev Classifies one barrage candidate cell into a result code: 0
-    ///      inactive, 1 miss, 2 ship hit, 3 mine, 4 shield break. A shield
-    ///      break takes priority over every other code: it does not damage
-    ///      the ship and is not a mine (mines and ship cells are disjoint
-    ///      by placement, and the shield only ever guards a ship cell, so
-    ///      this never actually conflicts with the mine code, the check is
-    ///      kept explicit to stay safe either way).
-    function _barrageResultCode(
-        ebool trulyActive,
-        ebool shieldBreak,
-        euint256 candidateMask,
-        euint256 mineMask,
-        euint256 boardMask
-    ) internal returns (euint256) {
-        ebool isMine = candidateMask.and(mineMask).ne(uint256(0)).and(shieldBreak.not());
-        ebool isShipHit = candidateMask.and(boardMask).ne(uint256(0)).and(shieldBreak.not());
-        euint256 normalCode =
-            isMine.select(e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1))));
-        euint256 code = shieldBreak.select(e.asEuint256(uint256(4)), normalCode);
-        return trulyActive.select(code, e.asEuint256(uint256(0)));
-    }
-
-    function _localToGlobalCell(euint256 localIdx, uint8 anchorRow, uint8 anchorCol) internal returns (euint256) {
-        euint256 localRow = localIdx.div(uint256(BARRAGE_AREA_SIZE));
-        euint256 localCol = localIdx.rem(uint256(BARRAGE_AREA_SIZE));
-        return localRow.add(uint256(anchorRow)).mul(uint256(BOARD_SIZE)).add(localCol.add(uint256(anchorCol)));
     }
 
     /// @dev Decodes the six packed slots, marks every active slot's cell as
