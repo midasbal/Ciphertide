@@ -118,24 +118,43 @@ contract BattleshipTest is IncoTest {
         packedValue = uint256(packedAtt.value);
     }
 
-    /// @dev Decodes one 6 bit barrage slot (4 bit local position, 2 bit
-    /// result code: 0 inactive, 1 miss, 2 ship hit, 3 mine) from the packed
-    /// value, mirroring the contract's own packing.
+    /// @dev Decodes one 7 bit barrage slot (4 bit local position, 3 bit
+    /// result code: 0 inactive, 1 miss, 2 ship hit, 3 mine, 4 shield break)
+    /// from the packed value, mirroring the contract's own packing.
     function _decodeBarrageSlot(uint256 packedValue, uint8 slotIndex) internal pure returns (uint256 code) {
-        uint256 slotValue = (packedValue >> (uint256(slotIndex) * 6)) & 0x3F;
+        uint256 slotValue = (packedValue >> (uint256(slotIndex) * 7)) & 0x7F;
         code = slotValue >> 4;
     }
 
-    function _confirmPendingShot(uint256 matchId, address requester) internal {
-        (bytes32 hitHandle, bytes32 allDestroyedHandle, bytes32 mineHitHandle) = game.getPendingShotHandles(matchId);
-        (DecryptionAttestation memory hitAtt, bytes[] memory hitSigs) =
-            getDecryptionAttestation(requester, HandleWithProof({handle: hitHandle, proof: _emptyAllowanceProof()}));
-        (DecryptionAttestation memory winAtt, bytes[] memory winSigs) = getDecryptionAttestation(
-            requester, HandleWithProof({handle: allDestroyedHandle, proof: _emptyAllowanceProof()})
-        );
+    /// @dev Fetches the attestation for one of a pending shot's four handles
+    /// (0 hit, 1 allDestroyed, 2 mineHit, 3 shieldBreak), re-fetching the
+    /// handle set each call. Split out so _confirmPendingShot never holds
+    /// more than one attestation pair as a bare local at a time, which
+    /// would otherwise overflow the EVM's local variable limit alongside
+    /// confirmShot's own four attestation-plus-signatures parameters.
+    function _shotHandleAttestation(uint256 matchId, address requester, uint8 which)
+        internal
+        returns (DecryptionAttestation memory, bytes[] memory)
+    {
+        (bytes32 hitHandle, bytes32 allDestroyedHandle, bytes32 mineHitHandle, bytes32 shieldBreakHandle) =
+            game.getPendingShotHandles(matchId);
+        bytes32 handle = which == 0
+            ? hitHandle
+            : which == 1 ? allDestroyedHandle : which == 2 ? mineHitHandle : shieldBreakHandle;
+        return getDecryptionAttestation(requester, HandleWithProof({handle: handle, proof: _emptyAllowanceProof()}));
+    }
+
+    function _confirmPendingShot(uint256 matchId, address requester) internal returns (bool hit, bool shieldBreak) {
+        (DecryptionAttestation memory hitAtt, bytes[] memory hitSigs) = _shotHandleAttestation(matchId, requester, 0);
+        (DecryptionAttestation memory winAtt, bytes[] memory winSigs) =
+            _shotHandleAttestation(matchId, requester, 1);
         (DecryptionAttestation memory mineAtt, bytes[] memory mineSigs) =
-            getDecryptionAttestation(requester, HandleWithProof({handle: mineHitHandle, proof: _emptyAllowanceProof()}));
-        game.confirmShot(matchId, hitAtt, hitSigs, winAtt, winSigs, mineAtt, mineSigs);
+            _shotHandleAttestation(matchId, requester, 2);
+        (DecryptionAttestation memory shieldAtt, bytes[] memory shieldSigs) =
+            _shotHandleAttestation(matchId, requester, 3);
+        game.confirmShot(matchId, hitAtt, hitSigs, winAtt, winSigs, mineAtt, mineSigs, shieldAtt, shieldSigs);
+        hit = uint256(hitAtt.value) != 0;
+        shieldBreak = uint256(shieldAtt.value) != 0;
     }
 
     function testCreateAndJoinMatch() public {
@@ -702,13 +721,19 @@ contract BattleshipTest is IncoTest {
         game.placeShield{value: fee}(matchId, ciphertext);
     }
 
-    function testShieldAbsorbsFirstHitAndCellSurvivesForSecondHit() public {
-        // alice is CAPTAIN_SHIELD in _createAndJoinMatch. Her board is the
-        // standard test layout, so cell 0 is a real ship cell (ship 0).
-        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+    /// @dev The break is a distinct, revealed outcome (hit=false and
+    /// shieldBreak=true), not a disguised miss: no ship damage, the cell
+    /// survives (it is not logged into shotsAgainstMe), and the turn passes
+    /// like a miss. A later shot on the same cell is then a normal hit that
+    /// destroys the ship and keeps the turn.
+    function testShieldBreaksAsDistinctOutcomeCellSurvivesAndTurnPasses() public {
+        // alice is CAPTAIN_SHIELD in _createAndJoinMatch. Give her the tiny
+        // ships board so cell 0 is a real, single-cell ship: a genuine hit
+        // destroys it outright, making a break (no damage) easy to tell
+        // apart from a real hit (ship destroyed).
+        (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
         uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
 
-        // Get it to alice's turn so she can place her shield.
         if (game.getTurn(matchId) != alice) {
             _passTurnWithMiss(matchId, bob, 200);
         }
@@ -716,6 +741,7 @@ contract BattleshipTest is IncoTest {
 
         _placeShield(matchId, alice, 0);
         processAllOperations();
+        assertTrue(game.isShieldActive(matchId, 0), "shield should be active once committed");
 
         // placeShield is a free action, alice still has the turn; spend it
         // on a genuine miss against bob's tiny-ships board so the turn
@@ -726,13 +752,17 @@ contract BattleshipTest is IncoTest {
         vm.prank(bob);
         game.shoot(matchId, 0);
         processAllOperations();
-        _confirmPendingShot(matchId, bob);
+        (bool hit, bool shieldBreak) = _confirmPendingShot(matchId, bob);
 
-        // The shield absorbed the hit: it reveals as a miss, so the turn
-        // passes back to alice exactly like shooting open water.
-        assertEq(game.getTurn(matchId), alice, "a shielded absorb should read as a miss and pass the turn");
+        assertFalse(hit, "a shield break must not read as a ship hit");
+        assertTrue(shieldBreak, "the break must be its own revealed outcome");
+        assertEq(game.getTurn(matchId), alice, "a break resolves like a miss, the turn passes");
+        assertFalse(game.isShieldActive(matchId, 0), "the shield should be consumed by the break");
 
-        // The cell survived (it was not burned), so alice can pass the turn
+        uint256 revealedAfterBreak = getUint256Value(game.getLastDestroyedMask(matchId, 0));
+        assertEq(revealedAfterBreak, 0, "a shield break must not sink the ship it is guarding");
+
+        // The cell survived (it was not logged), so alice can pass the turn
         // back and bob can hit cell 0 again, this time for real.
         _passTurnWithMiss(matchId, alice, 101);
         assertEq(game.getTurn(matchId), bob, "turn should have passed back to bob");
@@ -740,10 +770,14 @@ contract BattleshipTest is IncoTest {
         vm.prank(bob);
         game.shoot(matchId, 0);
         processAllOperations();
-        _confirmPendingShot(matchId, bob);
+        (bool secondHit, bool secondBreak) = _confirmPendingShot(matchId, bob);
 
-        // A genuine hit keeps the shooter's turn.
-        assertEq(game.getTurn(matchId), bob, "the second shot on the same cell should resolve as a real hit");
+        assertTrue(secondHit, "the second shot on the same cell should resolve as a real hit");
+        assertFalse(secondBreak, "the shield is already gone, this shot cannot break it again");
+        assertEq(game.getTurn(matchId), bob, "a genuine hit keeps the shooter's turn");
+
+        uint256 revealedAfterRealHit = getUint256Value(game.getLastDestroyedMask(matchId, 0));
+        assertEq(revealedAfterRealHit, uint256(1), "the real hit should destroy the single-cell ship at cell 0");
     }
 
     function testShieldIsSingleUsePerMatch() public {
@@ -766,8 +800,8 @@ contract BattleshipTest is IncoTest {
         game.placeShield{value: fee}(matchId, ciphertext);
     }
 
-    function testOpponentCannotReadTheShieldedCellHandle() public {
-        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+    function testOpponentCannotReadTheShieldedCellHandleBeforeItBreaks() public {
+        (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
         uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
         if (game.getTurn(matchId) != alice) {
             _passTurnWithMiss(matchId, bob, 200);
@@ -779,6 +813,18 @@ contract BattleshipTest is IncoTest {
         euint256 handle = game.getShieldCellHandle(matchId, 0);
         assertTrue(e.isAllowed(alice, handle), "the owning player should keep access to their own shielded cell");
         assertFalse(e.isAllowed(bob, handle), "the opponent must never be allowed to read the shielded cell");
+
+        // Break it, and confirm raw handle access is still never granted:
+        // only the derived hit/break booleans are ever revealed, the which-
+        // cell information the shooter learns comes from the plaintext cell
+        // argument they themselves passed to shoot(), not from the handle.
+        _passTurnWithMiss(matchId, alice, 100);
+        vm.prank(bob);
+        game.shoot(matchId, 0);
+        processAllOperations();
+        _confirmPendingShot(matchId, bob);
+
+        assertFalse(e.isAllowed(bob, handle), "the opponent must never be allowed to read the raw handle");
     }
 
     function testOnlyCaptainShieldCanPlaceShield() public {
@@ -807,29 +853,36 @@ contract BattleshipTest is IncoTest {
         game.placeShield{value: fee}(matchId, ciphertext);
     }
 
-    function testInvalidWaterPickLeavesNoActiveShieldAndLaterHitsResolveNormally() public {
-        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+    /// @dev shieldActive is public and set once a shield is committed, even
+    /// for an invalid pick; validity is enforced entirely through the
+    /// obliviously zeroed shieldCellMask, which can then never equal a real
+    /// shot bit, so an invalid pick's shield never breaks.
+    function testInvalidWaterPickIsCommittedButNeverBreaksTheShield() public {
+        (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
         uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
         if (game.getTurn(matchId) != alice) {
             _passTurnWithMiss(matchId, bob, 200);
         }
 
-        // Cell 200 is water on alice's standard test board, an invalid pick
+        // Cell 200 is water on alice's tiny ships board, an invalid pick
         // for the ship-cell-only shield.
         _placeShield(matchId, alice, 200);
         processAllOperations();
+        assertTrue(game.isShieldActive(matchId, 0), "shieldActive reflects commitment, not pick validity");
 
         _passTurnWithMiss(matchId, alice, 100);
         assertEq(game.getTurn(matchId), bob, "turn should have passed to bob");
 
-        // A real ship cell should still resolve as a genuine hit, proving
-        // the invalid pick never armed the shield.
+        // A real ship cell should still resolve as a genuine hit, never a
+        // break, proving the invalid pick can never match a real shot.
         vm.prank(bob);
-        game.shoot(matchId, 1);
+        game.shoot(matchId, 0);
         processAllOperations();
-        _confirmPendingShot(matchId, bob);
+        (bool hit, bool shieldBreak) = _confirmPendingShot(matchId, bob);
 
-        assertEq(game.getTurn(matchId), bob, "an unshielded ship cell should hit normally and keep the turn");
+        assertTrue(hit, "an unshielded ship cell should hit normally");
+        assertFalse(shieldBreak, "the invalid pick must never break as a shield");
+        assertEq(game.getTurn(matchId), bob, "a genuine hit keeps the turn");
     }
 
     function testPlacingShieldDoesNotPassTurnOrChargeTheClock() public {
@@ -849,5 +902,156 @@ contract BattleshipTest is IncoTest {
         assertEq(game.getTurn(matchId), alice, "placing a shield should not pass the turn");
         assertEq(game.getRemainingTime(matchId, 0), remainingBefore, "placing a shield should not charge the clock");
         assertEq(game.getLastMoveTimestamp(matchId), lastMoveBefore, "placing a shield should not reset the clock");
+    }
+
+    /// @dev Since the shield rework restored logging for every resolved
+    /// shot, a plain miss now burns its cell again exactly like it did
+    /// before that rework, so it can never be re-shot either.
+    function testPlainMissCannotBeReshotNowThatMissesAreLoggedAgain() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        address shooter = game.getTurn(matchId);
+        address defender = shooter == alice ? bob : alice;
+
+        // Cell 200 is empty on both test boards.
+        vm.prank(shooter);
+        game.shoot(matchId, 200);
+        processAllOperations();
+        _confirmPendingShot(matchId, shooter);
+
+        // A miss passes the turn to the defender. Hand it back to the
+        // original shooter with a genuine miss of their own (cell 201 is
+        // empty on both test boards too) so the reshoot attempt below
+        // targets the same board cell 200 was logged on.
+        vm.prank(defender);
+        game.shoot(matchId, 201);
+        processAllOperations();
+        _confirmPendingShot(matchId, defender);
+
+        assertEq(game.getTurn(matchId), shooter, "turn should be back with the original shooter");
+        vm.prank(shooter);
+        vm.expectRevert("cell already shot");
+        game.shoot(matchId, 200);
+    }
+
+    /// @dev A mine cell is logged into shotsAgainstMe exactly like a plain
+    /// miss, so the two are indistinguishable in the public log: both show
+    /// up as a logged cell that can never be shot again.
+    function testMineCellIsLoggedLikeAMissInThePublicLog() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+
+        address shooter = game.getTurn(matchId);
+        address defender = shooter == alice ? bob : alice;
+        uint8 defenderIdx = game.getPlayerAddress(matchId, 0) == defender ? 0 : 1;
+
+        // Cell 220 is empty on both test boards, seed it as the defender's
+        // only mine.
+        game.setMinesForTesting(matchId, defenderIdx, uint256(1) << 220, defender);
+        processAllOperations();
+
+        vm.prank(shooter);
+        game.shoot(matchId, 220);
+        processAllOperations();
+        _confirmPendingShot(matchId, shooter);
+
+        assertEq(
+            (game.getShotsAgainst(matchId, defenderIdx) >> 220) & 1,
+            1,
+            "a mine cell must be logged in the public shot log, just like a miss"
+        );
+
+        // Spend the defender's mine bonus (cell 221 miss keeps the turn,
+        // cell 222 miss then passes it) so the turn returns to the
+        // original shooter to try re-targeting the mine cell.
+        vm.prank(defender);
+        game.shoot(matchId, 221);
+        processAllOperations();
+        _confirmPendingShot(matchId, defender);
+
+        vm.prank(defender);
+        game.shoot(matchId, 222);
+        processAllOperations();
+        _confirmPendingShot(matchId, defender);
+
+        assertEq(game.getTurn(matchId), shooter, "turn should be back with the original shooter");
+        vm.prank(shooter);
+        vm.expectRevert("cell already shot");
+        game.shoot(matchId, 220);
+    }
+
+    /// @dev A barrage that strikes the shielded cell breaks it exactly once
+    /// (no damage, cell survives, shield consumed), while any other struck
+    /// cells resolve normally. The strike area is random, so this retries
+    /// across fresh matches until it lands on the shielded cell, the same
+    /// pattern testBarrageMinePenaltyAppliesAlongsideShipHits uses.
+    function testBarrageBreaksShieldOnceWithoutDestroyingShip() public {
+        bool observedBreak = false;
+        for (uint256 round = 0; round < 10 && !observedBreak; round++) {
+            // Cells 0-3 are all real single-cell ships on the tiny ships
+            // board, and all fall within the barrage's (0,0) anchored 4x4
+            // area (local row 0, columns 0-3), so any of them works as the
+            // shielded cell. Rotated per round so each round's placeShield
+            // ciphertext differs, the fake ciphertext used in tests is
+            // deterministic per (value, owner, contract), and reusing the
+            // exact same one across matches collides in the mock Inco
+            // handle store.
+            uint8 cellIdx = uint8(round % 4);
+
+            (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
+            uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+            if (game.getTurn(matchId) != alice) {
+                _passTurnWithMiss(matchId, bob, 200);
+            }
+
+            _placeShield(matchId, alice, cellIdx);
+            processAllOperations();
+
+            // Hand the turn to bob so he can fire the barrage at alice's
+            // board. Cell 100 is water on both test boards.
+            _passTurnWithMiss(matchId, alice, 100);
+
+            vm.deal(bob, 1 ether);
+            uint256 fee = _barrageFee();
+            vm.prank(bob);
+            // Anchored at (0,0), the 4x4 area covers cells 0-3 among others.
+            game.useBarrage{value: fee}(matchId, 0, 0);
+            processAllOperations();
+            uint256 packed = _confirmPendingBarrage(matchId, bob);
+
+            uint256 breakCount = 0;
+            bool shieldedCellWasBreak = false;
+            for (uint8 k = 0; k < game.BARRAGE_MAX_CELLS(); k++) {
+                uint256 code = _decodeBarrageSlot(packed, k);
+                if (code != 4) continue;
+                breakCount++;
+                uint256 localPos = ((packed >> (uint256(k) * 7)) & 0x7F) & 0xF;
+                if (localPos == cellIdx) shieldedCellWasBreak = true;
+            }
+            if (!shieldedCellWasBreak) continue;
+            observedBreak = true;
+
+            assertEq(breakCount, 1, "the shield covers exactly one cell, at most one barrage slot can break it");
+            assertFalse(game.isShieldActive(matchId, 0), "the shield should be consumed by the barrage break");
+
+            uint256 revealed = getUint256Value(game.getLastDestroyedMask(matchId, 0));
+            assertEq(revealed & (uint256(1) << cellIdx), 0, "the shield break must not sink the ship it is guarding");
+            assertEq(
+                game.getShotsAgainst(matchId, 0) & (uint256(1) << cellIdx), 0, "a shield break must not burn the cell"
+            );
+
+            _passTurnWithMiss(matchId, alice, 101);
+            assertEq(game.getTurn(matchId), bob, "turn should have passed back to bob");
+
+            vm.prank(bob);
+            game.shoot(matchId, cellIdx);
+            processAllOperations();
+            (bool hit, bool shieldBreak) = _confirmPendingShot(matchId, bob);
+
+            assertTrue(hit, "the cell should now resolve as a real hit, the shield is already gone");
+            assertFalse(shieldBreak, "the shield cannot break twice");
+        }
+
+        assertTrue(observedBreak, "expected at least one barrage to strike the shielded cell");
     }
 }
