@@ -5,23 +5,23 @@ import {euint256, ebool, e, inco} from "@inco/lightning/src/Lib.sol";
 import {IncoTest} from "@inco/lightning/src/test/IncoTest.sol";
 import {DecryptionAttestation} from "@inco/lightning/src/lightning-parts/DecryptionAttester.types.sol";
 import {console} from "forge-std/console.sol";
-import {Battleship} from "../Battleship.sol";
-import {BattleshipHarness} from "./BattleshipHarness.sol";
+import {Ciphertide} from "../Ciphertide.sol";
+import {CiphertideHarness} from "./CiphertideHarness.sol";
 
 /// @notice Tests for the core loop: match creation and join, dice roll,
 ///         shot resolution, turn handling and win detection. Board state is
 ///         seeded directly through the test-only harness hook rather than
 ///         through real random placement, since that piece is still pending
 ///         a design decision (see the design writeup).
-contract BattleshipTest is IncoTest {
+contract CiphertideTest is IncoTest {
     using e for euint256;
     using e for ebool;
 
-    BattleshipHarness game;
+    CiphertideHarness game;
 
     function setUp() public override {
         super.setUp();
-        game = new BattleshipHarness();
+        game = new CiphertideHarness();
         vm.deal(alice, 1 ether);
         vm.deal(bob, 1 ether);
     }
@@ -78,7 +78,7 @@ contract BattleshipTest is IncoTest {
         uint256 diceFee = inco.getFee() * 2;
         for (uint256 attempts = 0; attempts < 10; attempts++) {
             _rollDiceOnce(matchId, p0, diceFee);
-            if (game.getPhase(matchId) == Battleship.Phase.InProgress) {
+            if (game.getPhase(matchId) == Ciphertide.Phase.InProgress) {
                 return;
             }
         }
@@ -159,7 +159,7 @@ contract BattleshipTest is IncoTest {
 
     function testCreateAndJoinMatch() public {
         uint256 matchId = _createAndJoinMatch(alice, bob);
-        assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.Placing));
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.Placing));
         assertEq(game.getPlayerAddress(matchId, 0), alice);
         assertEq(game.getPlayerAddress(matchId, 1), bob);
     }
@@ -231,7 +231,7 @@ contract BattleshipTest is IncoTest {
 
         address turnPlayer = game.getTurn(matchId);
         assertTrue(turnPlayer == alice || turnPlayer == bob);
-        assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.InProgress));
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.InProgress));
     }
 
     /// @dev confirmDiceRoll is authorized by the attestations matching the
@@ -261,7 +261,7 @@ contract BattleshipTest is IncoTest {
             vm.prank(carol);
             game.confirmDiceRoll(matchId, attA, sigA, attB, sigB);
 
-            if (game.getPhase(matchId) == Battleship.Phase.InProgress) {
+            if (game.getPhase(matchId) == Ciphertide.Phase.InProgress) {
                 assertTrue(game.getTurn(matchId) == alice || game.getTurn(matchId) == bob);
                 return;
             }
@@ -282,7 +282,7 @@ contract BattleshipTest is IncoTest {
         _confirmPendingShot(matchId, shooter);
 
         assertEq(game.getTurn(matchId), shooter, "shooter should keep the turn after a hit");
-        assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.InProgress));
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.InProgress));
     }
 
     function testShootGasUsage() public {
@@ -419,11 +419,11 @@ contract BattleshipTest is IncoTest {
             assertEq(revealed, uint256(1) << cell, "the ship just sunk by this shot should reveal exactly its cell");
 
             if (cell < 5) {
-                assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.InProgress));
+                assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.InProgress));
             }
         }
 
-        assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.Finished));
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.Finished));
         assertEq(game.getWinner(matchId), shooter);
     }
 
@@ -441,7 +441,7 @@ contract BattleshipTest is IncoTest {
         vm.prank(waiting);
         game.claimTimeout(matchId);
 
-        assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.Finished));
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.Finished));
         assertEq(game.getWinner(matchId), waiting);
     }
 
@@ -472,7 +472,7 @@ contract BattleshipTest is IncoTest {
         game.claimTimeout(matchId);
 
         // The match is still awaiting confirmation, not decided by timeout.
-        assertEq(uint256(game.getPhase(matchId)), uint256(Battleship.Phase.InProgress));
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.InProgress));
         assertEq(game.getWinner(matchId), address(0));
     }
 

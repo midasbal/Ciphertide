@@ -4,17 +4,17 @@ pragma solidity ^0.8.29;
 import {euint256, ebool, e, inco} from "@inco/lightning/src/Lib.sol";
 import {DecryptionAttestation} from "@inco/lightning/src/lightning-parts/DecryptionAttester.types.sol";
 import {asBool} from "@inco/lightning/src/shared/TypeUtils.sol";
-import {PlayerSlot} from "./BattleshipTypes.sol";
-import {BattleshipMechanics} from "./BattleshipMechanics.sol";
+import {PlayerSlot} from "./CiphertideTypes.sol";
+import {CiphertideMechanics} from "./CiphertideMechanics.sol";
 
-/// @notice Core 1v1 onchain Battleship loop on Base Sepolia, built on Inco
-///         Lightning. Step 1 scope only: a single core match loop, no mines,
-///         no skills, no captains, no NFTs.
-/// @dev Random encrypted ship placement is not implemented yet, see
-///      placeMyBoard(). Shot resolution, turn order and win detection are
-///      built and tested against a board state set through a test-only hook
-///      so this piece is not blocked on the placement design decision.
-contract Battleship {
+/// @notice Ciphertide: an onchain hidden-fleet naval duel on Base Sepolia,
+///         built on Inco Lightning. Encrypted fleet placement, a two phase
+///         shoot and confirm loop, mines, the shared Sonar and Barrage
+///         skills, and Captain 1's Shield.
+/// @dev Shot resolution, turn order and win detection are built and tested
+///      against a board state set through a test-only hook so this piece is
+///      not blocked on the placement design decision.
+contract Ciphertide {
     using e for euint256;
     using e for ebool;
 
@@ -231,7 +231,7 @@ contract Battleship {
 
         for (uint8 i = 0; i < NUM_SHIPS; i++) {
             (euint256 shipMask, ebool placedThisShip) =
-                BattleshipMechanics.placeOneShip(SHIP_LENGTHS[i], occupied, PLACEMENT_ATTEMPTS_PER_SHIP);
+                CiphertideMechanics.placeOneShip(SHIP_LENGTHS[i], occupied, PLACEMENT_ATTEMPTS_PER_SHIP);
             // shipMask is still the trivial zero handle whenever no attempt
             // succeeded, so folding it into occupied is always safe.
             occupied = occupied.or(shipMask);
@@ -243,7 +243,7 @@ contract Battleship {
         // they land on water only. They must never be allowed to the
         // opponent, only to this contract and the owner.
         (euint256 mineMask, ebool allMinesPlaced) =
-            BattleshipMechanics.placeMines(occupied, MINES_PER_PLAYER, MINE_PLACEMENT_ATTEMPTS);
+            CiphertideMechanics.placeMines(occupied, MINES_PER_PLAYER, MINE_PLACEMENT_ATTEMPTS);
         allPlaced = allPlaced.and(allMinesPlaced);
 
         occupied.allowThis();
@@ -755,7 +755,7 @@ contract Battleship {
         attacker.sonarUsed = true;
 
         PlayerSlot storage defender = m.players[1 - m.turn];
-        uint256 areaMask = BattleshipMechanics.rectMask(anchorRow, anchorCol, SONAR_AREA_SIZE, SONAR_AREA_SIZE);
+        uint256 areaMask = CiphertideMechanics.rectMask(anchorRow, anchorCol, SONAR_AREA_SIZE, SONAR_AREA_SIZE);
 
         ebool anyShip = defender.boardMask.and(areaMask).ne(uint256(0));
         anyShip.allowThis();
@@ -827,7 +827,7 @@ contract Battleship {
         require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
 
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = BattleshipMechanics.resolveBarrageStrikes(
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveBarrageStrikes(
             anchorRow,
             anchorCol,
             defender,

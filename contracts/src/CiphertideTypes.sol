@@ -4,12 +4,12 @@ pragma solidity ^0.8.29;
 import {euint256, ebool} from "@inco/lightning/src/Lib.sol";
 
 /// @notice Shared storage layout for a player's match slot.
-/// @dev Split out of Battleship.sol so BattleshipMechanics can take a
+/// @dev Split out of Ciphertide.sol so CiphertideMechanics can take a
 ///      storage pointer to it directly, without a circular import between
-///      the main contract and the mechanics library (Battleship imports the
-///      library to call it, so the library cannot in turn import Battleship
+///      the main contract and the mechanics library (Ciphertide imports the
+///      library to call it, so the library cannot in turn import Ciphertide
 ///      just to reuse this struct). The array length is written as the
-///      literal 6 rather than Battleship's NUM_SHIPS constant, since a free
+///      literal 6 rather than Ciphertide's NUM_SHIPS constant, since a free
 ///      struct cannot reference a constant declared inside a contract; the
 ///      fleet size is fixed game design, not a runtime tunable.
 struct PlayerSlot {

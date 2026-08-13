@@ -2,14 +2,14 @@
 pragma solidity ^0.8.29;
 
 import {euint256, ebool, e} from "@inco/lightning/src/Lib.sol";
-import {Battleship} from "../Battleship.sol";
+import {Ciphertide} from "../Ciphertide.sol";
 
 /// @notice Test-only subclass exposing the board-seeding hook and pending
 ///         handle reads so shot resolution, turn order and win detection
 ///         can be tested without depending on the real random placement
 ///         implementation, and without needing to parse event logs (which
 ///         would conflict with IncoTest's own use of vm.recordLogs()).
-contract BattleshipHarness is Battleship {
+contract CiphertideHarness is Ciphertide {
     function setBoardForTesting(
         uint256 matchId,
         uint8 playerIdx,

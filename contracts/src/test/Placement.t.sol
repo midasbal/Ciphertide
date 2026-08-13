@@ -5,8 +5,8 @@ import {euint256, ebool, e, inco} from "@inco/lightning/src/Lib.sol";
 import {IncoTest} from "@inco/lightning/src/test/IncoTest.sol";
 import {DecryptionAttestation} from "@inco/lightning/src/lightning-parts/DecryptionAttester.types.sol";
 import {console} from "forge-std/console.sol";
-import {Battleship} from "../Battleship.sol";
-import {BattleshipHarness} from "./BattleshipHarness.sol";
+import {Ciphertide} from "../Ciphertide.sol";
+import {CiphertideHarness} from "./CiphertideHarness.sol";
 
 /// @notice Tests for the random encrypted placement (Option A: bounded
 ///         per-ship arithmetic placement). Covers validity of the produced
@@ -16,13 +16,13 @@ contract PlacementTest is IncoTest {
     using e for euint256;
     using e for ebool;
 
-    BattleshipHarness game;
+    CiphertideHarness game;
     uint8 constant NUM_SHIPS = 6;
     uint8 constant BOARD_SIZE = 15;
 
     function setUp() public override {
         super.setUp();
-        game = new BattleshipHarness();
+        game = new CiphertideHarness();
         vm.deal(alice, 10 ether);
         vm.deal(bob, 10 ether);
     }

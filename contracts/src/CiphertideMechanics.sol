@@ -2,37 +2,37 @@
 pragma solidity ^0.8.29;
 
 import {euint256, ebool, e} from "@inco/lightning/src/Lib.sol";
-import {PlayerSlot} from "./BattleshipTypes.sol";
+import {PlayerSlot} from "./CiphertideTypes.sol";
 
-/// @notice Heavy, reusable FHE mechanics factored out of Battleship into a
+/// @notice Heavy, reusable FHE mechanics factored out of Ciphertide into a
 ///         separately deployed, linked external library, purely to keep
-///         Battleship's own deployed bytecode well clear of the EIP-170
+///         Ciphertide's own deployed bytecode well clear of the EIP-170
 ///         24576 byte runtime size limit as more captain skills are added
 ///         on top. Covers area and single-cell mask building, the bounded-
 ///         attempt random-cell drawing shared by ship placement, mine
 ///         placement and Barrage, and Barrage's strike resolution and
 ///         result packing.
-/// @dev Every function called from Battleship.sol is declared external, so
+/// @dev Every function called from Ciphertide.sol is declared external, so
 ///      those calls compile to a delegatecall against this library's own
 ///      deployed bytecode instead of being inlined into every caller, the
 ///      way a plain internal library would be. Helper functions used only
 ///      within this library stay internal, they get inlined into this
-///      library's own bytecode, which does not count against Battleship's
+///      library's own bytecode, which does not count against Ciphertide's
 ///      size limit either way. Behavior is unchanged from the functions
-///      this replaces in Battleship.sol, only where the code lives has
+///      this replaces in Ciphertide.sol, only where the code lives has
 ///      moved.
 ///
-///      Deploying Battleship for real requires deploying this library
-///      first and linking its address into Battleship's bytecode at build
+///      Deploying Ciphertide for real requires deploying this library
+///      first and linking its address into Ciphertide's bytecode at build
 ///      or deploy time (for example `forge create --libraries
-///      src/BattleshipMechanics.sol:BattleshipMechanics:<address>`, or the
+///      src/CiphertideMechanics.sol:CiphertideMechanics:<address>`, or the
 ///      equivalent `libraries` entry in a Foundry deploy script). An
-///      unlinked Battleship will not deploy.
-library BattleshipMechanics {
+///      unlinked Ciphertide will not deploy.
+library CiphertideMechanics {
     using e for euint256;
     using e for ebool;
 
-    /// Fixed game design, not a runtime tunable, mirrors Battleship.BOARD_SIZE.
+    /// Fixed game design, not a runtime tunable, mirrors Ciphertide.BOARD_SIZE.
     uint8 internal constant BOARD_SIZE = 15;
 
     // ---------------------------------------------------------------
