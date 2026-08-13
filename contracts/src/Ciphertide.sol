@@ -91,6 +91,13 @@ contract Ciphertide {
     uint8 public constant RAKE_ATTEMPTS_PER_CELL = 8;
     uint8 public constant RAKE_LOCAL_POS_BITS = 4;
 
+    /// Salvo: Captain 4's unique skill, 3 caller chosen specific cells,
+    /// struck at once. Unlike Barrage, Bombardment and Rake, the cells are
+    /// a direct public choice rather than a random draw within an area, so
+    /// Salvo draws no randomness and needs no fee, the same reason Sonar is
+    /// free. Costs the user their next turn instead: see PlayerSlot.skipNextTurn.
+    uint8 public constant SALVO_CELL_COUNT = 3;
+
     /// Captain identity, declared per player when entering a match. Every
     /// captain carries the two shared skills, Sonar and Barrage, plus one
     /// unique skill. This contract only records which captain a player
@@ -122,7 +129,8 @@ contract Ciphertide {
         Sonar,
         Barrage,
         Bombardment,
-        Rake
+        Rake,
+        Salvo
     }
 
     struct Match {
@@ -142,13 +150,15 @@ contract Ciphertide {
         ebool pendingMineHit; // shot only
         ebool pendingShieldBreak; // shot only
         ebool pendingSonarResult; // sonar only
-        // Shared by barrage and bombardment (never both at once, gated by
-        // pendingAction), the per-slot bit width differs between them, see
-        // CiphertideMechanics.resolveAreaStrikes for the packed encoding.
+        // Shared by barrage, bombardment, rake and salvo (never more than
+        // one at once, gated by pendingAction), the per-slot bit width and
+        // encoding differs between the area skills and salvo, see
+        // CiphertideMechanics.resolveAreaStrikes and resolveChosenStrikes.
         euint256 pendingAreaPacked;
         ebool pendingAreaAllDestroyed;
-        uint8 pendingAreaAnchorRow;
-        uint8 pendingAreaAnchorCol;
+        uint8 pendingAreaAnchorRow; // barrage, bombardment, rake only
+        uint8 pendingAreaAnchorCol; // barrage, bombardment, rake only
+        uint8[3] pendingSalvoCells; // salvo only
     }
 
     mapping(uint256 => Match) internal matches;
@@ -197,6 +207,16 @@ contract Ciphertide {
         uint256 indexed matchId, address indexed player, uint8 row, bytes32 packedHandle, bytes32 allDestroyedHandle
     );
     event RakeResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
+    event SalvoFired(
+        uint256 indexed matchId,
+        address indexed player,
+        uint8 cell0,
+        uint8 cell1,
+        uint8 cell2,
+        bytes32 packedHandle,
+        bytes32 allDestroyedHandle
+    );
+    event SalvoResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
     event ShieldPlaced(uint256 indexed matchId, address indexed player);
     event ShieldBroken(uint256 indexed matchId, address indexed owner, uint8 cell);
     event MatchWon(uint256 indexed matchId, address indexed winner);
@@ -506,6 +526,23 @@ contract Ciphertide {
         m.lastMoveTimestamp = block.timestamp;
     }
 
+    /// @dev Resolves the turn to hand it to candidateIdx, consuming that
+    ///      player's pending Salvo forfeit if one is set: candidateIdx's
+    ///      turn is skipped exactly once and the turn stays with the other
+    ///      player instead. The flag is cleared the moment it is consumed
+    ///      here, so it can never skip more than the one turn it was set
+    ///      for, and every call site that hands the turn over routes
+    ///      through this, so the forfeit composes with the mine bonus (which
+    ///      never calls this, it keeps the turn on the current actor
+    ///      instead) without any risk of a deadlock.
+    function _advanceTurn(Match storage m, uint8 candidateIdx) internal returns (uint8) {
+        if (m.players[candidateIdx].skipNextTurn) {
+            m.players[candidateIdx].skipNextTurn = false;
+            return 1 - candidateIdx;
+        }
+        return candidateIdx;
+    }
+
     /// @dev Gates a unique captain skill to the player who declared that
     ///      captain, for example _requireCaptainOwnsSkill(m, playerIdx,
     ///      CAPTAIN_SHIELD) inside placeShield, or CAPTAIN_BOMBARDMENT
@@ -766,7 +803,7 @@ contract Ciphertide {
                 if (m.players[shooterIdx].bonusShotAvailable) {
                     m.players[shooterIdx].bonusShotAvailable = false;
                 } else {
-                    m.turn = 1 - shooterIdx;
+                    m.turn = _advanceTurn(m, 1 - shooterIdx);
                 }
             } else if (m.players[shooterIdx].bonusShotAvailable) {
                 // A hit already keeps the turn on its own; a pending bonus
@@ -832,7 +869,7 @@ contract Ciphertide {
         if (m.players[actor].bonusShotAvailable) {
             m.players[actor].bonusShotAvailable = false;
         } else {
-            m.turn = 1 - actor;
+            m.turn = _advanceTurn(m, 1 - actor);
         }
         m.lastMoveTimestamp = block.timestamp;
 
@@ -1002,21 +1039,21 @@ contract Ciphertide {
         emit RakeFired(matchId, msg.sender, row, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
     }
 
-    /// @dev Shared firing step for every area-strike skill (Barrage,
-    ///      Bombardment, Rake): calls CiphertideMechanics.resolveAreaStrikes,
-    ///      allows and reveals the resulting packed value and win bit,
-    ///      records the newly destroyed mask, and stashes the pending actor
-    ///      and area fields shared across all of them. Each caller still
-    ///      sets its own m.pendingAction and emits its own Fired event
-    ///      afterward, since those differ per skill.
-    function _fireAreaStrike(
+    /// @dev Shared reveal-and-stash tail for every multi-cell strike skill
+    ///      (Barrage, Bombardment, Rake, Salvo): allows and reveals the
+    ///      resolved packed value and win bit, records the newly destroyed
+    ///      mask, and stashes the pending actor and packed/win fields
+    ///      shared across all of them. Each caller still sets its own
+    ///      area- or salvo-specific pending fields, m.pendingAction and
+    ///      emits its own Fired event afterward, since those differ per
+    ///      skill.
+    function _finalizeAreaPending(
         Match storage m,
         PlayerSlot storage defender,
-        CiphertideMechanics.AreaGeometry memory area,
-        CiphertideMechanics.StrikeConfig memory config
-    ) internal returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) {
-        (packed, newlyDestroyed, allDestroyed) = CiphertideMechanics.resolveAreaStrikes(area, defender, config);
-
+        euint256 packed,
+        euint256 newlyDestroyed,
+        ebool allDestroyed
+    ) internal {
         packed.allowThis();
         allDestroyed.allowThis();
         newlyDestroyed.allowThis();
@@ -1028,6 +1065,21 @@ contract Ciphertide {
         m.pendingActor = m.turn;
         m.pendingAreaPacked = packed;
         m.pendingAreaAllDestroyed = allDestroyed;
+    }
+
+    /// @dev Shared firing step for every area-strike skill (Barrage,
+    ///      Bombardment, Rake): calls CiphertideMechanics.resolveAreaStrikes,
+    ///      then _finalizeAreaPending, and stashes the aimed area's anchor.
+    ///      Each caller still sets its own m.pendingAction and emits its
+    ///      own Fired event afterward, since those differ per skill.
+    function _fireAreaStrike(
+        Match storage m,
+        PlayerSlot storage defender,
+        CiphertideMechanics.AreaGeometry memory area,
+        CiphertideMechanics.StrikeConfig memory config
+    ) internal returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) {
+        (packed, newlyDestroyed, allDestroyed) = CiphertideMechanics.resolveAreaStrikes(area, defender, config);
+        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
         m.pendingAreaAnchorRow = area.anchorRow;
         m.pendingAreaAnchorCol = area.anchorCol;
     }
@@ -1109,7 +1161,7 @@ contract Ciphertide {
             if (m.players[actorIdx].bonusShotAvailable) {
                 m.players[actorIdx].bonusShotAvailable = false;
             } else {
-                m.turn = 1 - actorIdx;
+                m.turn = _advanceTurn(m, 1 - actorIdx);
             }
             m.lastMoveTimestamp = block.timestamp;
         }
@@ -1260,6 +1312,121 @@ contract Ciphertide {
         _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
 
+    /// @notice Captain Salvo's unique skill: strikes 3 caller chosen cells
+    ///         on the opponent's board at once, revealing hit or miss for
+    ///         each. Resolves like the other multi-cell skills in every
+    ///         other respect: ship hits burn cells and can sink ships, a
+    ///         struck mine still applies its penalty, and a struck cell
+    ///         that is the defender's shielded cell resolves as a shield
+    ///         break instead (no damage, the cell survives, the shield is
+    ///         consumed). Single use per match, the player's whole action
+    ///         for the turn, and its cost: the next time it would become
+    ///         this player's turn, that turn is skipped once and passes
+    ///         straight back to the opponent.
+    /// @dev The 3 cells are a direct public choice, not a random draw, so
+    ///      this needs no random draws and no fee, the same reason Sonar is
+    ///      free. Cell validity (in range, the 3 distinct, none already
+    ///      shot) is checked with plain requires up front rather than
+    ///      obliviously, since these are plaintext inputs from the start,
+    ///      unlike Shield's own encrypted cell pick.
+    function useSalvo(uint256 matchId, uint8 cell0, uint8 cell1, uint8 cell2) external onlyPlayer(matchId) {
+        Match storage m = matches[matchId];
+        _beginAction(m);
+        _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_SALVO);
+        require(cell0 < BOARD_CELLS && cell1 < BOARD_CELLS && cell2 < BOARD_CELLS, "cell out of range");
+        require(cell0 != cell1 && cell0 != cell2 && cell1 != cell2, "salvo cells must be distinct");
+
+        PlayerSlot storage attacker = m.players[m.turn];
+        require(!attacker.salvoUsed, "salvo already used");
+        attacker.salvoUsed = true;
+
+        PlayerSlot storage defender = m.players[1 - m.turn];
+        require((defender.shotsAgainstMe >> cell0) & 1 == 0, "cell already shot");
+        require((defender.shotsAgainstMe >> cell1) & 1 == 0, "cell already shot");
+        require((defender.shotsAgainstMe >> cell2) & 1 == 0, "cell already shot");
+
+        uint256[3] memory shotBits = [uint256(1) << cell0, uint256(1) << cell1, uint256(1) << cell2];
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
+            CiphertideMechanics.resolveChosenStrikes(shotBits, defender);
+        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
+        m.pendingSalvoCells = [cell0, cell1, cell2];
+
+        m.pendingAction = PendingAction.Salvo;
+
+        emit SalvoFired(matchId, msg.sender, cell0, cell1, cell2, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
+    }
+
+    /// @dev Decodes salvo's packed slots (3 bits per cell, no local
+    ///      position needed, the caller already chose and stored the 3
+    ///      cells in m.pendingSalvoCells), marks every struck cell as shot
+    ///      except a shield break, and emits per-cell results. Returns
+    ///      whether any struck cell was a mine, the same shape as
+    ///      _applyAreaResults, kept separate since salvo's packing has no
+    ///      position bits or anchor to decode against.
+    function _applySalvoResults(uint256 matchId, PlayerSlot storage defender, uint256 packed, uint8[3] memory cells)
+        internal
+        returns (bool anyMineTriggered)
+    {
+        for (uint8 k = 0; k < SALVO_CELL_COUNT; k++) {
+            uint256 code = (packed >> (uint256(k) * 3)) & 0x7;
+            uint8 cell = cells[k];
+            if (code == 4) {
+                defender.shieldActive = false;
+                emit ShieldBroken(matchId, defender.addr, cell);
+            } else {
+                defender.shotsAgainstMe |= (uint256(1) << cell);
+            }
+            if (code == 3) {
+                anyMineTriggered = true;
+            }
+            emit SalvoResolved(matchId, cell, code == 2, code == 3, code == 4);
+        }
+    }
+
+    /// @notice Confirms a pending salvo: marks each of the 3 struck cells
+    ///         as shot, applies the single non-stacking mine bonus if any
+    ///         struck cell was a mine, resolves a shield break if the
+    ///         defender's shielded cell was among them, resolves the win or
+    ///         turn pass, and, if the match continues, sets the caller's
+    ///         skipNextTurn flag so their next turn is forfeited once.
+    /// @dev The skip flag is set here rather than in useSalvo so it never
+    ///      gets set on a salvo that wins the match outright, and shares
+    ///      _finishAreaAction with Barrage, Bombardment and Rake for the
+    ///      mine bonus, win and turn-pass logic, which itself now routes
+    ///      through _advanceTurn so the forfeit takes effect the next time
+    ///      the turn would land back on the salvo user.
+    function confirmSalvo(
+        uint256 matchId,
+        DecryptionAttestation memory packedAttestation,
+        bytes[] memory packedSignatures,
+        DecryptionAttestation memory allDestroyedAttestation,
+        bytes[] memory allDestroyedSignatures
+    ) external {
+        Match storage m = matches[matchId];
+        require(m.pendingAction == PendingAction.Salvo, "no pending salvo");
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
+            "invalid salvo attestation"
+        );
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
+            "invalid win attestation"
+        );
+        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "salvo handle mismatch");
+        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
+
+        uint8 actorIdx = m.pendingActor;
+        PlayerSlot storage defender = m.players[1 - actorIdx];
+        bool won = asBool(allDestroyedAttestation.value);
+        bool anyMineTriggered =
+            _applySalvoResults(matchId, defender, uint256(packedAttestation.value), m.pendingSalvoCells);
+
+        if (!won) {
+            m.players[actorIdx].skipNextTurn = true;
+        }
+        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
+    }
+
     function claimTimeout(uint256 matchId) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         require(m.phase == Phase.InProgress, "match not in progress");
@@ -1341,6 +1508,10 @@ contract Ciphertide {
 
     function hasShieldCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
         return !matches[matchId].players[playerIdx].shieldUsed;
+    }
+
+    function hasSalvoCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return !matches[matchId].players[playerIdx].salvoUsed;
     }
 
     function getShieldCellHandle(uint256 matchId, uint8 playerIdx) external view returns (euint256) {

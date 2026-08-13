@@ -366,4 +366,48 @@ library CiphertideMechanics {
         return
             localRow.add(uint256(area.anchorRow)).mul(uint256(BOARD_SIZE)).add(localCol.add(uint256(area.anchorCol)));
     }
+
+    // ---------------------------------------------------------------
+    // Salvo: strike 3 caller chosen, already validated cells at once. No
+    // randomness is involved, the cells are a public choice like the area
+    // skills' aim rectangle, only their contents are confidential, so this
+    // draws no random cells and needs no bounded-attempt search. Packs one
+    // 3 bit result code per cell (0 unused, 1 miss, 2 ship hit, 3 mine, 4
+    // shield break, the same codes resolveAreaStrikes uses) into a single
+    // euint256, 3 bits per slot, no local position needed since the caller
+    // already knows which cells it chose.
+    // ---------------------------------------------------------------
+
+    /// @dev shotBits holds each chosen cell's single-bit mask
+    ///      (1 << cell), computed in plaintext by the caller since the
+    ///      cells themselves are public inputs. Cell validity (in range,
+    ///      distinct, not already shot) is the caller's responsibility,
+    ///      checked in plain requires before this runs. Reuses
+    ///      _applyAreaShipDamage for ship hit tracking and the newly sunk
+    ///      and win detection, exactly like one call to resolveAreaStrikes.
+    function resolveChosenStrikes(uint256[3] memory shotBits, PlayerSlot storage defender)
+        external
+        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
+    {
+        euint256 struckMask = e.asEuint256(uint256(0));
+        packed = e.asEuint256(uint256(0));
+
+        for (uint8 k = 0; k < 3; k++) {
+            uint256 shotBit = shotBits[k];
+            ebool shieldBreak = defender.shieldActive ? defender.shieldCellMask.eq(shotBit) : e.asEbool(false);
+            ebool isMine = defender.mineMask.and(shotBit).ne(uint256(0)).and(shieldBreak.not());
+            ebool isShipHit = defender.boardMask.and(shotBit).ne(uint256(0)).and(shieldBreak.not());
+            euint256 normalCode = isMine.select(
+                e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1)))
+            );
+            euint256 code = shieldBreak.select(e.asEuint256(uint256(4)), normalCode);
+
+            packed = packed.or(code.shl(uint256(k) * 3));
+
+            ebool countsAsStruck = shieldBreak.not();
+            struckMask = struckMask.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
+        }
+
+        (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckMask);
+    }
 }

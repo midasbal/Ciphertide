@@ -67,8 +67,9 @@ contract CiphertideHarness is Ciphertide {
         return ebool.unwrap(matches[matchId].pendingSonarResult);
     }
 
-    /// @dev Shared by Barrage and Bombardment (never both at once, gated by
-    ///      pendingAction), the pending fields underneath are shared too.
+    /// @dev Shared by Barrage, Bombardment, Rake and Salvo (never more than
+    ///      one at once, gated by pendingAction), the pending fields
+    ///      underneath are shared too.
     function getPendingAreaHandles(uint256 matchId)
         external
         view
@@ -76,5 +77,9 @@ contract CiphertideHarness is Ciphertide {
     {
         Match storage m = matches[matchId];
         return (euint256.unwrap(m.pendingAreaPacked), ebool.unwrap(m.pendingAreaAllDestroyed));
+    }
+
+    function hasSkipNextTurn(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return matches[matchId].players[playerIdx].skipNextTurn;
     }
 }

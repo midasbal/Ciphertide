@@ -30,7 +30,13 @@ struct PlayerSlot {
     bool barrageUsed;
     bool bombardmentUsed; // gates useBombardment to once per match, captain 2 only
     bool rakeUsed; // gates useRake to once per match, captain 3 only
+    bool salvoUsed; // gates useSalvo to once per match, captain 4 only
     bool shieldUsed; // gates placeShield to once per match, captain 1 only
+    // Set on the salvo user once useSalvo resolves, Salvo's forfeit cost.
+    // Consumed the next time the turn would land on this player: that turn
+    // is skipped once and passes straight back to the opponent, then this
+    // flag clears itself, so it can never skip more than the one turn.
+    bool skipNextTurn;
     euint256 shieldCellMask; // encrypted single-bit mask of the shielded cell, 0 if none or invalid
     // Public on purpose: whether a shield has been committed is not a
     // secret, only the CELL it guards is. True once placeShield has run,

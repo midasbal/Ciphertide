@@ -171,6 +171,24 @@ contract CiphertideTest is IncoTest {
         packedValue = uint256(packedAtt.value);
     }
 
+    function _confirmPendingSalvo(uint256 matchId, address requester) internal returns (uint256 packedValue) {
+        (bytes32 packedHandle, bytes32 allDestroyedHandle) = game.getPendingAreaHandles(matchId);
+        (DecryptionAttestation memory packedAtt, bytes[] memory packedSigs) =
+            getDecryptionAttestation(requester, HandleWithProof({handle: packedHandle, proof: _emptyAllowanceProof()}));
+        (DecryptionAttestation memory winAtt, bytes[] memory winSigs) = getDecryptionAttestation(
+            requester, HandleWithProof({handle: allDestroyedHandle, proof: _emptyAllowanceProof()})
+        );
+        game.confirmSalvo(matchId, packedAtt, packedSigs, winAtt, winSigs);
+        packedValue = uint256(packedAtt.value);
+    }
+
+    /// @dev Decodes one salvo slot (3 bit result code only, no local
+    /// position: salvo's 3 cells are already known public choices, unlike
+    /// the random area skills), mirroring CiphertideMechanics.resolveChosenStrikes.
+    function _decodeSalvoSlot(uint256 packedValue, uint8 slotIndex) internal pure returns (uint256 code) {
+        code = (packedValue >> (uint256(slotIndex) * 3)) & 0x7;
+    }
+
     /// @dev Decodes one area-strike slot (positionBits bits of local
     /// position, 3 bit result code: 0 inactive, 1 miss, 2 ship hit, 3 mine,
     /// 4 shield break) from a packed value, mirroring the contract's own
@@ -1685,5 +1703,292 @@ contract CiphertideTest is IncoTest {
         }
 
         assertTrue(observedBreak, "expected at least one rake to strike the shielded cell");
+    }
+
+    // Salvo: Captain 4's unique skill. Neither alice nor bob is
+    // CAPTAIN_SALVO in _createAndJoinMatch, so these tests declare their
+    // own captains via _setupInProgressMatchWithCaptains. The 3 cells are
+    // a direct public choice rather than a random draw, so unlike Barrage,
+    // Bombardment and Rake, every one of these tests is fully deterministic,
+    // no retry loop across fresh matches is needed anywhere below.
+    // _setupInProgressMatchWithCaptains always gives player index 1 (bob,
+    // when bob is p1) the tiny ships board, cells 0-5 are real single-cell
+    // ships and everything else is water, regardless of the board0 argument,
+    // which only ever seeds player index 0.
+
+    /// @dev Salvo needs no fee (useSalvo is not payable): the 3 cells are a
+    /// public choice, every op resolveChosenStrikes uses (and, eq, ne,
+    /// select, or, shl) is free, exactly like Sonar.
+    function testSalvoStrikesThreeChosenCellsAndRevealsEach() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        // Bob has the tiny ships board: cells 0 and 1 are real ships, 224
+        // is water.
+        vm.prank(alice);
+        game.useSalvo(matchId, 0, 1, 224);
+        processAllOperations();
+        uint256 packed = _confirmPendingSalvo(matchId, alice);
+
+        assertEq(_decodeSalvoSlot(packed, 0), 2, "cell 0 is a real ship, should resolve as a hit");
+        assertEq(_decodeSalvoSlot(packed, 1), 2, "cell 1 is a real ship, should resolve as a hit");
+        assertEq(_decodeSalvoSlot(packed, 2), 1, "cell 224 is water, should resolve as a miss");
+    }
+
+    function testSalvoGasUsage() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        vm.prank(alice);
+        uint256 gasBefore = gasleft();
+        game.useSalvo(matchId, 0, 1, 2);
+        uint256 gasUsed = gasBefore - gasleft();
+        console.log("useSalvo() gas used (3 chosen cells, no random draws):", gasUsed);
+    }
+
+    function testSalvoConsumesChargeAndPassesTurn() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 aliceIdx = game.getPlayerAddress(matchId, 0) == alice ? 0 : 1;
+
+        vm.prank(alice);
+        game.useSalvo(matchId, 200, 201, 202);
+        processAllOperations();
+        _confirmPendingSalvo(matchId, alice);
+
+        assertEq(game.getTurn(matchId), bob, "salvo is the whole action for the turn, it should pass");
+        assertFalse(game.hasSalvoCharge(matchId, aliceIdx), "salvo's single charge should now be spent");
+
+        // Consume alice's forfeited turn and pass back to her before
+        // checking reuse.
+        _passTurnWithMiss(matchId, bob, 210);
+        assertEq(game.getTurn(matchId), bob, "alice's next turn is forfeited by salvo, it stays with bob");
+        _passTurnWithMiss(matchId, bob, 211);
+        assertEq(game.getTurn(matchId), alice, "the forfeit is single use, the turn should be back with alice");
+
+        vm.prank(alice);
+        vm.expectRevert("salvo already used");
+        game.useSalvo(matchId, 212, 213, 214);
+    }
+
+    /// @dev The core of Salvo's cost: using it grants the opponent two
+    /// actions in a row (their own turn, plus the salvo user's forfeited
+    /// one) before the turn returns to the salvo user.
+    function testSalvoForfeitsNextTurnSoOpponentActsTwice() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 aliceIdx = game.getPlayerAddress(matchId, 0) == alice ? 0 : 1;
+
+        vm.prank(alice);
+        game.useSalvo(matchId, 200, 201, 202);
+        processAllOperations();
+        _confirmPendingSalvo(matchId, alice);
+
+        assertTrue(game.hasSkipNextTurn(matchId, aliceIdx), "salvo should flag alice's next turn as forfeited");
+        assertEq(game.getTurn(matchId), bob, "turn passes to bob immediately after salvo, as usual");
+
+        // Bob's first action: a plain miss that would normally hand the
+        // turn back to alice, but her turn is skipped, so it stays with bob.
+        _passTurnWithMiss(matchId, bob, 210);
+        assertEq(game.getTurn(matchId), bob, "alice's turn was skipped, bob acts again");
+        assertFalse(game.hasSkipNextTurn(matchId, aliceIdx), "the forfeit is consumed once it is skipped");
+
+        // Bob's second action: a plain miss now passes the turn normally.
+        _passTurnWithMiss(matchId, bob, 211);
+        assertEq(game.getTurn(matchId), alice, "after the forfeited turn is consumed, play returns to alice");
+    }
+
+    function testOnlyCaptainSalvoCanUseIt() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        // alice is CAPTAIN_SHIELD and bob is CAPTAIN_BOMBARDMENT in
+        // _createAndJoinMatch, neither is salvo.
+        address turnPlayer = game.getTurn(matchId);
+
+        vm.prank(turnPlayer);
+        vm.expectRevert("captain does not own this skill");
+        game.useSalvo(matchId, 0, 1, 2);
+    }
+
+    function testSalvoRevertsOnOutOfRangeCell() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        // BOARD_CELLS is 225, so cell 225 is one past the last valid cell.
+        vm.prank(alice);
+        vm.expectRevert("cell out of range");
+        game.useSalvo(matchId, 0, 1, 225);
+    }
+
+    function testSalvoRevertsOnDuplicateCell() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        vm.prank(alice);
+        vm.expectRevert("salvo cells must be distinct");
+        game.useSalvo(matchId, 5, 5, 6);
+    }
+
+    function testSalvoRevertsOnAlreadyShotCell() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        // A plain shot on cell 220 logs it into bob's shotsAgainstMe and
+        // passes the turn to bob (a miss), then bob's own miss hands the
+        // turn back to alice so she can attempt the salvo.
+        _passTurnWithMiss(matchId, alice, 220);
+        _passTurnWithMiss(matchId, bob, 221);
+
+        vm.prank(alice);
+        vm.expectRevert("cell already shot");
+        game.useSalvo(matchId, 220, 221, 222);
+    }
+
+    /// @dev Salvo can sink a ship and win exactly like the other multi-cell
+    /// skills, but deterministically: sink 5 of the tiny ships board's six
+    /// single-cell ships (0-4) with plain shots, keeping the turn on every
+    /// hit, then aim the salvo's 3 chosen cells to include the last
+    /// remaining ship cell (5).
+    function testSalvoCanSinkShipAndWin() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board1, uint256[6] memory ships1) = _tinyShipsBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board1, ships1);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        for (uint8 cell = 0; cell < 5; cell++) {
+            vm.prank(alice);
+            game.shoot(matchId, cell);
+            processAllOperations();
+            _confirmPendingShot(matchId, alice);
+        }
+        assertEq(game.getTurn(matchId), alice, "five hits in a row should keep alice's turn");
+
+        vm.prank(alice);
+        game.useSalvo(matchId, 5, 210, 211);
+        processAllOperations();
+        _confirmPendingSalvo(matchId, alice);
+
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.Finished));
+        assertEq(game.getWinner(matchId), alice, "alice should win once the last ship cell is struck by the salvo");
+    }
+
+    /// @dev Seeds a real mine at one of the 3 chosen cells and confirms
+    /// exactly one bonus action is granted, the same no-stacking rule
+    /// Barrage, Bombardment and Rake use.
+    function testSalvoMinePenaltyGrantsExactlyOneBonus() public {
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, salvoCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
+        game.setMinesForTesting(matchId, bobIdx, uint256(1) << 200, bob);
+        processAllOperations();
+
+        vm.prank(alice);
+        // Bob has the tiny ships board: cell 5 is a real ship, cell 200 is
+        // the seeded mine, 224 is water.
+        game.useSalvo(matchId, 5, 200, 224);
+        processAllOperations();
+        uint256 packed = _confirmPendingSalvo(matchId, alice);
+
+        assertEq(_decodeSalvoSlot(packed, 0), 2, "cell 5 is a real ship, should resolve as a hit");
+        assertEq(_decodeSalvoSlot(packed, 1), 3, "cell 200 is the seeded mine, should resolve as code 3");
+        assertTrue(game.hasBonusShot(matchId, bobIdx), "striking a mine should grant its owner exactly one bonus");
+    }
+
+    /// @dev A salvo that strikes the shielded cell breaks it exactly once
+    /// (no damage, cell survives, shield consumed), mirroring the other
+    /// multi-cell skills' shield break tests, deterministically since the 3
+    /// cells are a direct public choice.
+    function testSalvoBreaksShieldOnceWithoutDestroyingShip() public {
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        uint8 salvoCaptain = game.CAPTAIN_SALVO();
+        (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
+        uint256 matchId = _setupInProgressMatchWithCaptains(alice, bob, shieldCaptain, salvoCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        _placeShield(matchId, alice, 3);
+        processAllOperations();
+
+        // Hand the turn to bob so he can fire the salvo at alice's board.
+        // Cell 100 is water on both test boards.
+        _passTurnWithMiss(matchId, alice, 100);
+
+        vm.prank(bob);
+        // Alice has the tiny ships board: cell 3 is shielded, cell 4 is a
+        // real ship, 224 is water.
+        game.useSalvo(matchId, 3, 4, 224);
+        processAllOperations();
+        uint256 packed = _confirmPendingSalvo(matchId, bob);
+
+        assertEq(_decodeSalvoSlot(packed, 0), 4, "the shielded cell should resolve as a shield break");
+        assertEq(_decodeSalvoSlot(packed, 1), 2, "cell 4 is a real ship, should resolve as a hit");
+        assertEq(_decodeSalvoSlot(packed, 2), 1, "cell 224 is water, should resolve as a miss");
+        assertFalse(game.isShieldActive(matchId, 0), "the shield should be consumed by the salvo break");
+
+        uint256 revealed = getUint256Value(game.getLastDestroyedMask(matchId, 0));
+        assertEq(revealed & (uint256(1) << 3), 0, "the shield break must not sink the ship it is guarding");
+        assertEq(game.getShotsAgainst(matchId, 0) & (uint256(1) << 3), 0, "a shield break must not burn the cell");
+
+        // The turn already passed to alice after the salvo resolved (a
+        // non-winning salvo is bob's whole action, so it passes just like
+        // Barrage, Bombardment and Rake), and bob is the salvo user here,
+        // so his own next turn is now flagged as forfeited.
+        assertEq(game.getTurn(matchId), alice, "salvo is the whole action for the turn, it should pass");
+        _passTurnWithMiss(matchId, alice, 101);
+        assertEq(game.getTurn(matchId), alice, "bob's next turn was forfeited by his own salvo, it stays with alice");
+        _passTurnWithMiss(matchId, alice, 102);
+        assertEq(game.getTurn(matchId), bob, "the forfeit is single use, the turn should be back with bob");
+
+        vm.prank(bob);
+        game.shoot(matchId, 3);
+        processAllOperations();
+        (bool hit, bool shieldBreak) = _confirmPendingShot(matchId, bob);
+
+        assertTrue(hit, "the cell should now resolve as a real hit, the shield is already gone");
+        assertFalse(shieldBreak, "the shield cannot break twice");
     }
 }
