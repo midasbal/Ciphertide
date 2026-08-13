@@ -61,6 +61,20 @@ contract Battleship {
     uint8 public constant BARRAGE_MAX_CELLS = 6;
     uint8 public constant BARRAGE_ATTEMPTS_PER_CELL = 8;
 
+    /// Captain identity, declared per player when entering a match. Every
+    /// captain carries the two shared skills, Sonar and Barrage, plus one
+    /// unique skill that is not implemented yet. This contract only records
+    /// which captain a player declared, it does not store currency, unlock
+    /// state, or any other profile or progression data, and it does not
+    /// check whether a captain is unlocked. That is handled entirely off
+    /// chain in the frontend profile. Any player may declare any captain.
+    uint8 public constant CAPTAIN_SHIELD = 1;
+    uint8 public constant CAPTAIN_BOMBARDMENT = 2;
+    uint8 public constant CAPTAIN_RAKE = 3;
+    uint8 public constant CAPTAIN_SALVO = 4;
+    uint8 public constant CAPTAIN_CARPET = 5;
+    uint8 public constant NUM_CAPTAINS = 5;
+
     enum Phase {
         WaitingForOpponent,
         Placing,
@@ -71,6 +85,7 @@ contract Battleship {
 
     struct PlayerSlot {
         address addr;
+        uint8 captain; // declared at createMatch or joinMatch, one of the NUM_CAPTAINS ids
         bool placed;
         euint256 boardMask; // OR of all shipMask entries, one bit per cell
         euint256[NUM_SHIPS] shipMask; // cells occupied by each ship, disjoint
@@ -159,19 +174,30 @@ contract Battleship {
         _;
     }
 
-    function createMatch() external returns (uint256 matchId) {
+    /// @notice Creates a new match and declares the creator's captain.
+    /// @dev The captain id is only ever checked here for being one of the
+    ///      NUM_CAPTAINS valid ids, never for being unlocked. Unlock state
+    ///      lives entirely off chain in the frontend profile.
+    function createMatch(uint8 captainId) external returns (uint256 matchId) {
+        require(captainId >= 1 && captainId <= NUM_CAPTAINS, "invalid captain id");
         matchId = nextMatchId++;
         Match storage m = matches[matchId];
         m.phase = Phase.WaitingForOpponent;
         m.players[0].addr = msg.sender;
+        m.players[0].captain = captainId;
         emit MatchCreated(matchId, msg.sender);
     }
 
-    function joinMatch(uint256 matchId) external {
+    /// @notice Joins an existing match and declares the joiner's captain.
+    /// @dev Same validation as createMatch: only checks the id is in range,
+    ///      never whether it is unlocked.
+    function joinMatch(uint256 matchId, uint8 captainId) external {
+        require(captainId >= 1 && captainId <= NUM_CAPTAINS, "invalid captain id");
         Match storage m = matches[matchId];
         require(m.phase == Phase.WaitingForOpponent, "match not joinable");
         require(m.players[0].addr != msg.sender, "cannot play yourself");
         m.players[1].addr = msg.sender;
+        m.players[1].captain = captainId;
         m.phase = Phase.Placing;
         emit MatchJoined(matchId, msg.sender);
     }
@@ -522,6 +548,15 @@ contract Battleship {
         m.players[m.turn].remainingTime =
             elapsed >= m.players[m.turn].remainingTime ? 0 : m.players[m.turn].remainingTime - elapsed;
         m.lastMoveTimestamp = block.timestamp;
+    }
+
+    /// @dev Not called anywhere yet, the unique captain skills do not exist
+    ///      yet. Once a unique skill function is built, it should call this
+    ///      first to require the acting player declared the captain that
+    ///      owns that skill, for example _requireCaptainOwnsSkill(m,
+    ///      playerIdx, CAPTAIN_SHIELD) inside a future useShield function.
+    function _requireCaptainOwnsSkill(Match storage m, uint8 playerIdx, uint8 requiredCaptainId) internal view {
+        require(m.players[playerIdx].captain == requiredCaptainId, "captain does not own this skill");
     }
 
     function shoot(uint256 matchId, uint8 cell) external onlyPlayer(matchId) {
@@ -1021,6 +1056,10 @@ contract Battleship {
 
     function getPlayerAddress(uint256 matchId, uint8 playerIdx) external view returns (address) {
         return matches[matchId].players[playerIdx].addr;
+    }
+
+    function getCaptain(uint256 matchId, uint8 playerIdx) external view returns (uint8) {
+        return matches[matchId].players[playerIdx].captain;
     }
 
     function getRemainingTime(uint256 matchId, uint8 playerIdx) external view returns (uint256) {

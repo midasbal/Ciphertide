@@ -28,10 +28,14 @@ contract PlacementTest is IncoTest {
     }
 
     function _createAndJoinMatch(address p0, address p1) internal returns (uint256 matchId) {
+        // Cache the captain ids before pranking, calling a view function
+        // while building the next call would consume the prank early.
+        uint8 p0Captain = game.CAPTAIN_SHIELD();
+        uint8 p1Captain = game.CAPTAIN_BOMBARDMENT();
         vm.prank(p0);
-        matchId = game.createMatch();
+        matchId = game.createMatch(p0Captain);
         vm.prank(p1);
-        game.joinMatch(matchId);
+        game.joinMatch(matchId, p1Captain);
     }
 
     function _placementFee() internal view returns (uint256) {

@@ -27,10 +27,14 @@ contract BattleshipTest is IncoTest {
     }
 
     function _createAndJoinMatch(address p0, address p1) internal returns (uint256 matchId) {
+        // Cache the captain ids before pranking, calling a view function
+        // while building the next call would consume the prank early.
+        uint8 p0Captain = game.CAPTAIN_SHIELD();
+        uint8 p1Captain = game.CAPTAIN_BOMBARDMENT();
         vm.prank(p0);
-        matchId = game.createMatch();
+        matchId = game.createMatch(p0Captain);
         vm.prank(p1);
-        game.joinMatch(matchId);
+        game.joinMatch(matchId, p1Captain);
     }
 
     /// @dev Non-overlapping test layout on the 15x15 board (row stride 15):
@@ -142,11 +146,64 @@ contract BattleshipTest is IncoTest {
     }
 
     function testCannotJoinOwnMatch() public {
+        uint8 captain = game.CAPTAIN_SHIELD();
         vm.prank(alice);
-        uint256 matchId = game.createMatch();
+        uint256 matchId = game.createMatch(captain);
         vm.prank(alice);
         vm.expectRevert("cannot play yourself");
-        game.joinMatch(matchId);
+        game.joinMatch(matchId, captain);
+    }
+
+    /// @dev Each player declares their captain independently, including
+    /// both players declaring the same one, and getCaptain returns exactly
+    /// what was declared for each player slot.
+    function testCaptainsAreRecordedAndReturnedPerPlayer() public {
+        uint8 aliceCaptain = game.CAPTAIN_RAKE();
+        uint8 bobCaptain = game.CAPTAIN_SALVO();
+
+        vm.prank(alice);
+        uint256 matchId = game.createMatch(aliceCaptain);
+        vm.prank(bob);
+        game.joinMatch(matchId, bobCaptain);
+
+        assertEq(game.getCaptain(matchId, 0), aliceCaptain);
+        assertEq(game.getCaptain(matchId, 1), bobCaptain);
+    }
+
+    function testBothPlayersCanDeclareTheSameCaptain() public {
+        uint8 sharedCaptain = game.CAPTAIN_CARPET();
+
+        vm.prank(alice);
+        uint256 matchId = game.createMatch(sharedCaptain);
+        vm.prank(bob);
+        game.joinMatch(matchId, sharedCaptain);
+
+        assertEq(game.getCaptain(matchId, 0), sharedCaptain);
+        assertEq(game.getCaptain(matchId, 1), sharedCaptain);
+    }
+
+    function testCreateMatchRevertsOnOutOfRangeCaptain() public {
+        uint8 numCaptains = game.NUM_CAPTAINS();
+        vm.prank(alice);
+        vm.expectRevert("invalid captain id");
+        game.createMatch(numCaptains + 1);
+    }
+
+    function testCreateMatchRevertsOnZeroCaptain() public {
+        vm.prank(alice);
+        vm.expectRevert("invalid captain id");
+        game.createMatch(0);
+    }
+
+    function testJoinMatchRevertsOnOutOfRangeCaptain() public {
+        uint8 validCaptain = game.CAPTAIN_SHIELD();
+        uint8 numCaptains = game.NUM_CAPTAINS();
+        vm.prank(alice);
+        uint256 matchId = game.createMatch(validCaptain);
+
+        vm.prank(bob);
+        vm.expectRevert("invalid captain id");
+        game.joinMatch(matchId, numCaptains + 1);
     }
 
     function testDiceRollDecidesTurnAndAdvancesPhase() public {
