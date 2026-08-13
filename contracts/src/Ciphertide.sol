@@ -10,7 +10,7 @@ import {CiphertideMechanics} from "./CiphertideMechanics.sol";
 /// @notice Ciphertide: an onchain hidden-fleet naval duel on Base Sepolia,
 ///         built on Inco Lightning. Encrypted fleet placement, a two phase
 ///         shoot and confirm loop, mines, the shared Sonar and Barrage
-///         skills, and Captain 1's Shield.
+///         skills, Captain 1's Shield, and Captain 2's Bombardment.
 /// @dev Shot resolution, turn order and win detection are built and tested
 ///      against a board state set through a test-only hook so this piece is
 ///      not blocked on the placement design decision.
@@ -57,19 +57,34 @@ contract Ciphertide {
     /// depending on the random count. Each slot draws BARRAGE_ATTEMPTS_PER_CELL
     /// independent candidates to land on a cell distinct from every other
     /// slot and from cells already shot, few attempts suffice since the
-    /// area only has 16 cells and at most 5 are already excluded.
+    /// area only has 16 cells and at most 5 are already excluded. A 4x4
+    /// area has 16 cells, addressed by exactly 4 bits, see
+    /// CiphertideMechanics.resolveAreaStrikes for the packed encoding this
+    /// feeds.
     uint8 public constant BARRAGE_AREA_SIZE = 4;
     uint8 public constant BARRAGE_MIN_CELLS = 4;
     uint8 public constant BARRAGE_MAX_CELLS = 6;
     uint8 public constant BARRAGE_ATTEMPTS_PER_CELL = 8;
+    uint8 public constant BARRAGE_LOCAL_POS_BITS = 4;
+
+    /// Bombardment: Captain 2's unique skill, one 10x10 area, a fixed 15 of
+    /// its 100 cells are struck. Unlike Barrage's randomized 4 to 6, the
+    /// count never varies, so it shares the same bounded-attempt drawing
+    /// and packing machinery with minCells simply equal to maxCells. A
+    /// 10x10 area has 100 cells, needing 7 bits (up to 127) to address a
+    /// local position, one bit wider than Barrage's 4 bits.
+    uint8 public constant BOMBARDMENT_AREA_SIZE = 10;
+    uint8 public constant BOMBARDMENT_STRIKE_COUNT = 15;
+    uint8 public constant BOMBARDMENT_ATTEMPTS_PER_CELL = 8;
+    uint8 public constant BOMBARDMENT_LOCAL_POS_BITS = 7;
 
     /// Captain identity, declared per player when entering a match. Every
     /// captain carries the two shared skills, Sonar and Barrage, plus one
-    /// unique skill that is not implemented yet. This contract only records
-    /// which captain a player declared, it does not store currency, unlock
-    /// state, or any other profile or progression data, and it does not
-    /// check whether a captain is unlocked. That is handled entirely off
-    /// chain in the frontend profile. Any player may declare any captain.
+    /// unique skill. This contract only records which captain a player
+    /// declared, it does not store currency, unlock state, or any other
+    /// profile or progression data, and it does not check whether a
+    /// captain is unlocked. That is handled entirely off chain in the
+    /// frontend profile. Any player may declare any captain.
     uint8 public constant CAPTAIN_SHIELD = 1;
     uint8 public constant CAPTAIN_BOMBARDMENT = 2;
     uint8 public constant CAPTAIN_RAKE = 3;
@@ -85,14 +100,15 @@ contract Ciphertide {
         Finished
     }
 
-    /// At most one action (a normal shot, sonar, or barrage) can be in
-    /// flight at a time, awaiting its confirmation before the next action
-    /// is allowed.
+    /// At most one action (a normal shot, sonar, barrage, or bombardment)
+    /// can be in flight at a time, awaiting its confirmation before the
+    /// next action is allowed.
     enum PendingAction {
         None,
         Shot,
         Sonar,
-        Barrage
+        Barrage,
+        Bombardment
     }
 
     struct Match {
@@ -112,10 +128,13 @@ contract Ciphertide {
         ebool pendingMineHit; // shot only
         ebool pendingShieldBreak; // shot only
         ebool pendingSonarResult; // sonar only
-        euint256 pendingBarragePacked; // barrage only, 7 bits per slot: 4 bit local pos + 3 bit result code
-        ebool pendingBarrageAllDestroyed; // barrage only
-        uint8 pendingBarrageAnchorRow; // barrage only
-        uint8 pendingBarrageAnchorCol; // barrage only
+        // Shared by barrage and bombardment (never both at once, gated by
+        // pendingAction), the per-slot bit width differs between them, see
+        // CiphertideMechanics.resolveAreaStrikes for the packed encoding.
+        euint256 pendingAreaPacked;
+        ebool pendingAreaAllDestroyed;
+        uint8 pendingAreaAnchorRow;
+        uint8 pendingAreaAnchorCol;
     }
 
     mapping(uint256 => Match) internal matches;
@@ -151,6 +170,15 @@ contract Ciphertide {
         bytes32 allDestroyedHandle
     );
     event BarrageResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
+    event BombardmentFired(
+        uint256 indexed matchId,
+        address indexed player,
+        uint8 anchorRow,
+        uint8 anchorCol,
+        bytes32 packedHandle,
+        bytes32 allDestroyedHandle
+    );
+    event BombardmentResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
     event ShieldPlaced(uint256 indexed matchId, address indexed player);
     event ShieldBroken(uint256 indexed matchId, address indexed owner, uint8 cell);
     event MatchWon(uint256 indexed matchId, address indexed winner);
@@ -460,11 +488,10 @@ contract Ciphertide {
         m.lastMoveTimestamp = block.timestamp;
     }
 
-    /// @dev Not called anywhere yet, the unique captain skills do not exist
-    ///      yet. Once a unique skill function is built, it should call this
-    ///      first to require the acting player declared the captain that
-    ///      owns that skill, for example _requireCaptainOwnsSkill(m,
-    ///      playerIdx, CAPTAIN_SHIELD) inside a future useShield function.
+    /// @dev Gates a unique captain skill to the player who declared that
+    ///      captain, for example _requireCaptainOwnsSkill(m, playerIdx,
+    ///      CAPTAIN_SHIELD) inside placeShield, or CAPTAIN_BOMBARDMENT
+    ///      inside useBombardment.
     function _requireCaptainOwnsSkill(Match storage m, uint8 playerIdx, uint8 requiredCaptainId) internal view {
         require(m.players[playerIdx].captain == requiredCaptainId, "captain does not own this skill");
     }
@@ -806,10 +833,12 @@ contract Ciphertide {
     ///         the turn.
     /// @dev The count and the six candidate cells are picked with the same
     ///      bounded-attempt, first-non-overlapping-candidate pattern as
-    ///      ship placement, entirely on encrypted values. The only reveals
-    ///      are one packed value (six 7 bit slots: 4 bit local position
-    ///      plus a 3 bit result code, 0 inactive, 1 miss, 2 hit, 3 mine, 4
-    ///      shield break), the newly sunk ship mask, and the win bit.
+    ///      ship placement, entirely on encrypted values, via the shared
+    ///      CiphertideMechanics.resolveAreaStrikes (also used by
+    ///      Bombardment below). The only reveals are one packed value (six
+    ///      7 bit slots: 4 bit local position plus a 3 bit result code, 0
+    ///      inactive, 1 miss, 2 hit, 3 mine, 4 shield break), the newly
+    ///      sunk ship mask, and the win bit.
     function useBarrage(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external payable onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         _beginAction(m);
@@ -827,14 +856,20 @@ contract Ciphertide {
         require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
 
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveBarrageStrikes(
-            anchorRow,
-            anchorCol,
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveAreaStrikes(
+            CiphertideMechanics.AreaGeometry({
+                anchorRow: anchorRow,
+                anchorCol: anchorCol,
+                width: BARRAGE_AREA_SIZE,
+                height: BARRAGE_AREA_SIZE
+            }),
             defender,
-            BARRAGE_AREA_SIZE,
-            BARRAGE_MIN_CELLS,
-            BARRAGE_MAX_CELLS,
-            BARRAGE_ATTEMPTS_PER_CELL
+            CiphertideMechanics.StrikeConfig({
+                minCells: BARRAGE_MIN_CELLS,
+                maxCells: BARRAGE_MAX_CELLS,
+                attemptsPerCell: BARRAGE_ATTEMPTS_PER_CELL,
+                positionBits: BARRAGE_LOCAL_POS_BITS
+            })
         );
 
         packed.allowThis();
@@ -847,34 +882,113 @@ contract Ciphertide {
 
         m.pendingAction = PendingAction.Barrage;
         m.pendingActor = m.turn;
-        m.pendingBarragePacked = packed;
-        m.pendingBarrageAllDestroyed = allDestroyed;
-        m.pendingBarrageAnchorRow = anchorRow;
-        m.pendingBarrageAnchorCol = anchorCol;
+        m.pendingAreaPacked = packed;
+        m.pendingAreaAllDestroyed = allDestroyed;
+        m.pendingAreaAnchorRow = anchorRow;
+        m.pendingAreaAnchorCol = anchorCol;
 
         emit BarrageFired(
             matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
         );
     }
 
-    /// @dev Decodes the six packed slots, marks every active slot's cell as
-    ///      shot, and emits per-cell results. Returns whether any struck
-    ///      cell was a mine, pulled into its own function to keep
-    ///      confirmBarrage's stack frame small.
-    function _applyBarrageResults(uint256 matchId, PlayerSlot storage defender, uint256 packed, Match storage m)
-        internal
-        returns (bool anyMineTriggered)
-    {
-        for (uint8 k = 0; k < BARRAGE_MAX_CELLS; k++) {
-            uint256 slotValue = (packed >> (uint256(k) * 7)) & 0x7F;
-            uint256 code = slotValue >> 4;
+    /// @notice Captain Bombardment's unique skill: strikes a fixed 15 of
+    ///         the 100 cells in a caller chosen 10x10 area, revealing hit
+    ///         or miss for each struck cell. Resolves exactly like Barrage
+    ///         in every other respect: ship hits burn cells and can sink
+    ///         ships, a struck mine still applies its penalty, and a
+    ///         struck cell that is the defender's shielded cell resolves
+    ///         as a shield break instead (no damage, the cell survives,
+    ///         the shield is consumed). Single use per match, and the
+    ///         player's whole action for the turn.
+    /// @dev Shares CiphertideMechanics.resolveAreaStrikes with Barrage,
+    ///      just over a larger area and a fixed strike count (minCells ==
+    ///      maxCells == BOMBARDMENT_STRIKE_COUNT) instead of a randomized
+    ///      range, so every one of the 15 slots is always active. The
+    ///      packed reveal uses BOMBARDMENT_LOCAL_POS_BITS (7) bits per
+    ///      local position instead of Barrage's 4, ten bits per slot, see
+    ///      resolveAreaStrikes for the full encoding.
+    function useBombardment(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external payable onlyPlayer(matchId) {
+        Match storage m = matches[matchId];
+        _beginAction(m);
+        _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_BOMBARDMENT);
+        require(
+            uint256(anchorRow) + BOMBARDMENT_AREA_SIZE <= BOARD_SIZE
+                && uint256(anchorCol) + BOMBARDMENT_AREA_SIZE <= BOARD_SIZE,
+            "bombardment area does not fit on the board"
+        );
+
+        PlayerSlot storage attacker = m.players[m.turn];
+        require(!attacker.bombardmentUsed, "bombardment already used");
+        attacker.bombardmentUsed = true;
+
+        uint256 totalDraws = uint256(1) + uint256(BOMBARDMENT_STRIKE_COUNT) * BOMBARDMENT_ATTEMPTS_PER_CELL;
+        require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
+
+        PlayerSlot storage defender = m.players[1 - m.turn];
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveAreaStrikes(
+            CiphertideMechanics.AreaGeometry({
+                anchorRow: anchorRow,
+                anchorCol: anchorCol,
+                width: BOMBARDMENT_AREA_SIZE,
+                height: BOMBARDMENT_AREA_SIZE
+            }),
+            defender,
+            CiphertideMechanics.StrikeConfig({
+                minCells: BOMBARDMENT_STRIKE_COUNT,
+                maxCells: BOMBARDMENT_STRIKE_COUNT,
+                attemptsPerCell: BOMBARDMENT_ATTEMPTS_PER_CELL,
+                positionBits: BOMBARDMENT_LOCAL_POS_BITS
+            })
+        );
+
+        packed.allowThis();
+        allDestroyed.allowThis();
+        newlyDestroyed.allowThis();
+        e.reveal(packed);
+        e.reveal(allDestroyed);
+        e.reveal(newlyDestroyed);
+        defender.lastDestroyedMask = newlyDestroyed;
+
+        m.pendingAction = PendingAction.Bombardment;
+        m.pendingActor = m.turn;
+        m.pendingAreaPacked = packed;
+        m.pendingAreaAllDestroyed = allDestroyed;
+        m.pendingAreaAnchorRow = anchorRow;
+        m.pendingAreaAnchorCol = anchorCol;
+
+        emit BombardmentFired(
+            matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
+        );
+    }
+
+    /// @dev Decodes an area strike's packed slots (shared by Barrage and
+    ///      Bombardment, isBombardment picks which Resolved event to emit),
+    ///      marks every active slot's cell as shot except a shield break,
+    ///      and emits per-cell results. Returns whether any struck cell was
+    ///      a mine, pulled into its own function to keep confirmBarrage and
+    ///      confirmBombardment's own stack frames small.
+    function _applyAreaResults(
+        uint256 matchId,
+        PlayerSlot storage defender,
+        uint256 packed,
+        uint8 anchorRow,
+        uint8 anchorCol,
+        uint8 width,
+        uint8 maxCells,
+        uint8 positionBits,
+        bool isBombardment
+    ) internal returns (bool anyMineTriggered) {
+        uint256 slotBits = uint256(positionBits) + 3;
+        uint256 slotMask = (uint256(1) << slotBits) - 1;
+        uint256 posMask = (uint256(1) << positionBits) - 1;
+        for (uint8 k = 0; k < maxCells; k++) {
+            uint256 slotValue = (packed >> (uint256(k) * slotBits)) & slotMask;
+            uint256 code = slotValue >> positionBits;
             if (code == 0) continue;
 
-            uint256 localPos = slotValue & 0xF;
-            uint8 globalCell = uint8(
-                (localPos / BARRAGE_AREA_SIZE + m.pendingBarrageAnchorRow) * BOARD_SIZE
-                    + (localPos % BARRAGE_AREA_SIZE + m.pendingBarrageAnchorCol)
-            );
+            uint256 localPos = slotValue & posMask;
+            uint8 globalCell = uint8((localPos / width + anchorRow) * BOARD_SIZE + (localPos % width + anchorCol));
             // Every resolved cell is logged into shotsAgainstMe, exactly as
             // before the shield rework, with one exception: a shield break
             // (code 4) is not logged, so that cell can be struck again once
@@ -892,7 +1006,39 @@ contract Ciphertide {
             }
             // A mine cell always reads as a miss, a ship hit or a shield
             // break are the only codes that report anything else.
-            emit BarrageResolved(matchId, globalCell, code == 2, code == 3, code == 4);
+            if (isBombardment) {
+                emit BombardmentResolved(matchId, globalCell, code == 2, code == 3, code == 4);
+            } else {
+                emit BarrageResolved(matchId, globalCell, code == 2, code == 3, code == 4);
+            }
+        }
+    }
+
+    /// @dev Shared confirm-step tail for a skill that is the player's whole
+    ///      action for the turn (Barrage, Bombardment, and Sonar follows
+    ///      the same pending-bonus shape inline): applies the single
+    ///      non-stacking mine bonus if any struck cell was a mine, resolves
+    ///      a win, or passes the turn, with a pending bonus action from an
+    ///      earlier mine trigger consumed here instead when one is due.
+    function _finishAreaAction(uint256 matchId, Match storage m, uint8 actorIdx, bool won, bool anyMineTriggered)
+        internal
+    {
+        m.pendingAction = PendingAction.None;
+        if (anyMineTriggered) {
+            m.players[1 - actorIdx].bonusShotAvailable = true;
+        }
+
+        if (won) {
+            m.phase = Phase.Finished;
+            m.winner = m.players[actorIdx].addr;
+            emit MatchWon(matchId, m.players[actorIdx].addr);
+        } else {
+            if (m.players[actorIdx].bonusShotAvailable) {
+                m.players[actorIdx].bonusShotAvailable = false;
+            } else {
+                m.turn = 1 - actorIdx;
+            }
+            m.lastMoveTimestamp = block.timestamp;
         }
     }
 
@@ -923,32 +1069,73 @@ contract Ciphertide {
             inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
             "invalid win attestation"
         );
-        require(euint256.unwrap(m.pendingBarragePacked) == packedAttestation.handle, "barrage handle mismatch");
-        require(ebool.unwrap(m.pendingBarrageAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
+        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "barrage handle mismatch");
+        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
 
         uint8 actorIdx = m.pendingActor;
-        address actor = m.players[actorIdx].addr;
         PlayerSlot storage defender = m.players[1 - actorIdx];
         bool won = asBool(allDestroyedAttestation.value);
-        bool anyMineTriggered = _applyBarrageResults(matchId, defender, uint256(packedAttestation.value), m);
+        bool anyMineTriggered = _applyAreaResults(
+            matchId,
+            defender,
+            uint256(packedAttestation.value),
+            m.pendingAreaAnchorRow,
+            m.pendingAreaAnchorCol,
+            BARRAGE_AREA_SIZE,
+            BARRAGE_MAX_CELLS,
+            BARRAGE_LOCAL_POS_BITS,
+            false
+        );
 
-        m.pendingAction = PendingAction.None;
-        if (anyMineTriggered) {
-            m.players[1 - actorIdx].bonusShotAvailable = true;
-        }
+        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
+    }
 
-        if (won) {
-            m.phase = Phase.Finished;
-            m.winner = actor;
-            emit MatchWon(matchId, actor);
-        } else {
-            if (m.players[actorIdx].bonusShotAvailable) {
-                m.players[actorIdx].bonusShotAvailable = false;
-            } else {
-                m.turn = 1 - actorIdx;
-            }
-            m.lastMoveTimestamp = block.timestamp;
-        }
+    /// @notice Confirms a pending bombardment: marks every struck cell as
+    ///         shot, applies the single non-stacking mine bonus if any
+    ///         struck cell was a mine, resolves a shield break if the
+    ///         defender's shielded cell was struck, and resolves the win
+    ///         or turn pass. Bombardment is the player's whole action for
+    ///         the turn, exactly like Barrage.
+    /// @dev If a bombardment happens to cover both of the defender's mines
+    ///      in one action, both attest as code 3, but the bonus flag below
+    ///      is only ever set to true, never incremented, so the owner still
+    ///      gets exactly one extra action, not two, matching Barrage.
+    function confirmBombardment(
+        uint256 matchId,
+        DecryptionAttestation memory packedAttestation,
+        bytes[] memory packedSignatures,
+        DecryptionAttestation memory allDestroyedAttestation,
+        bytes[] memory allDestroyedSignatures
+    ) external {
+        Match storage m = matches[matchId];
+        require(m.pendingAction == PendingAction.Bombardment, "no pending bombardment");
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
+            "invalid bombardment attestation"
+        );
+        require(
+            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
+            "invalid win attestation"
+        );
+        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "bombardment handle mismatch");
+        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
+
+        uint8 actorIdx = m.pendingActor;
+        PlayerSlot storage defender = m.players[1 - actorIdx];
+        bool won = asBool(allDestroyedAttestation.value);
+        bool anyMineTriggered = _applyAreaResults(
+            matchId,
+            defender,
+            uint256(packedAttestation.value),
+            m.pendingAreaAnchorRow,
+            m.pendingAreaAnchorCol,
+            BOMBARDMENT_AREA_SIZE,
+            BOMBARDMENT_STRIKE_COUNT,
+            BOMBARDMENT_LOCAL_POS_BITS,
+            true
+        );
+
+        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
 
     function claimTimeout(uint256 matchId) external onlyPlayer(matchId) {
@@ -1020,6 +1207,10 @@ contract Ciphertide {
 
     function hasBarrageCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
         return !matches[matchId].players[playerIdx].barrageUsed;
+    }
+
+    function hasBombardmentCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return !matches[matchId].players[playerIdx].bombardmentUsed;
     }
 
     function hasShieldCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {

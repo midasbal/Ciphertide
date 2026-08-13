@@ -10,8 +10,9 @@ import {PlayerSlot} from "./CiphertideTypes.sol";
 ///         24576 byte runtime size limit as more captain skills are added
 ///         on top. Covers area and single-cell mask building, the bounded-
 ///         attempt random-cell drawing shared by ship placement, mine
-///         placement and Barrage, and Barrage's strike resolution and
-///         result packing.
+///         placement, Barrage and Bombardment, and the area-strike
+///         resolution and result packing shared by Barrage, Bombardment,
+///         and any later skill with the same aim-strike-reveal shape.
 /// @dev Every function called from Ciphertide.sol is declared external, so
 ///      those calls compile to a delegatecall against this library's own
 ///      deployed bytecode instead of being inlined into every caller, the
@@ -151,60 +152,90 @@ library CiphertideMechanics {
     }
 
     // ---------------------------------------------------------------
-    // Barrage: strike resolution and result packing
+    // Area strikes: strike resolution and result packing, shared by
+    // Barrage, Bombardment, and any later skill with the same shape (aim
+    // a rectangle, strike some random distinct cells inside it, reveal
+    // each one).
     // ---------------------------------------------------------------
 
-    /// @dev Bundles one barrage slot's outputs into memory instead of three
-    ///      separate stack return values, keeping the picking loop's stack
-    ///      frame within the EVM's local variable limit.
-    struct BarrageSlotResult {
+    /// @dev Bundles one area-strike slot's outputs into memory instead of
+    ///      three separate stack return values, keeping the picking loop's
+    ///      stack frame within the EVM's local variable limit.
+    struct AreaSlotResult {
         euint256 newAvoid;
         euint256 packedSlot;
         euint256 struckContribution;
     }
 
-    /// @dev Draws the random count, picks all candidate slots, and folds
-    ///      the resulting struck cells into the defender's ship hit
-    ///      tracking. If a struck cell is the defender's active shielded
-    ///      cell, that slot resolves as a shield break (result code 4): no
-    ///      ship damage, and its contribution to the struck mask is zeroed.
+    /// @dev The rectangle a skill aims: width x height anchored at
+    ///      (anchorRow, anchorCol). Bundled into one memory struct, instead
+    ///      of four separate parameters threaded through every helper
+    ///      below, to keep each function's stack frame within the EVM's
+    ///      local variable limit.
+    struct AreaGeometry {
+        uint8 anchorRow;
+        uint8 anchorCol;
+        uint8 width;
+        uint8 height;
+    }
+
+    /// @dev How many cells an area strike draws and how it packs them, kept
+    ///      in one memory struct for the same stack frame reason as
+    ///      AreaGeometry. minCells and maxCells set the randomized strike
+    ///      count's range (equal for a fixed count, like Bombardment's 15).
+    ///      positionBits must be wide enough to address width * height
+    ///      distinct local positions (Barrage: 4 bits for a 4x4, 16 cell
+    ///      area. Bombardment: 7 bits for a 10x10, 100 cell area).
+    struct StrikeConfig {
+        uint8 minCells;
+        uint8 maxCells;
+        uint8 attemptsPerCell;
+        uint8 positionBits;
+    }
+
+    /// @dev Draws the strike count (randomized between minCells and
+    ///      maxCells, or fixed when minCells == maxCells, which still
+    ///      spends one random draw so the fee accounting stays uniform),
+    ///      picks all candidate slots inside the given area, and folds the
+    ///      resulting struck cells into the defender's ship hit tracking.
+    ///      If a struck cell is the defender's active shielded cell, that
+    ///      slot resolves as a shield break (result code 4): no ship
+    ///      damage, and its contribution to the struck mask is zeroed.
     ///      Whether the shield actually broke is only acted on later, once
     ///      the caller reveals and decodes the returned packed value back
     ///      to plaintext, this function only folds the break into the
     ///      encrypted packing, it never reads or writes shieldActive.
-    function resolveBarrageStrikes(
-        uint8 anchorRow,
-        uint8 anchorCol,
-        PlayerSlot storage defender,
-        uint8 areaSize,
-        uint8 minCells,
-        uint8 maxCells,
-        uint8 attemptsPerCell
-    ) external returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) {
+    ///
+    ///      Packs one result code (0 inactive, 1 miss, 2 ship hit, 3 mine,
+    ///      4 shield break) and a local cell position per slot into a
+    ///      single euint256: config.positionBits bits of local position,
+    ///      then 3 bits of code, (positionBits + 3) bits per slot, one slot
+    ///      per possible strike (config.maxCells slots total). Barrage: 4
+    ///      position bits, 7 bits per slot, 6 slots, 42 bits total.
+    ///      Bombardment: 7 position bits, 10 bits per slot, 15 slots, 150
+    ///      bits total. Both comfortably inside a single euint256's 256
+    ///      bits.
+    function resolveAreaStrikes(AreaGeometry memory area, PlayerSlot storage defender, StrikeConfig memory config)
+        external
+        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
+    {
         euint256 struckMask;
-        (packed, struckMask) =
-            _pickAllBarrageSlots(anchorRow, anchorCol, defender, areaSize, minCells, maxCells, attemptsPerCell);
-        (newlyDestroyed, allDestroyed) = _applyBarrageShipDamage(defender, struckMask);
+        (packed, struckMask) = _pickAllAreaSlots(area, defender, config);
+        (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckMask);
     }
 
-    function _pickAllBarrageSlots(
-        uint8 anchorRow,
-        uint8 anchorCol,
-        PlayerSlot storage defender,
-        uint8 areaSize,
-        uint8 minCells,
-        uint8 maxCells,
-        uint8 attemptsPerCell
-    ) internal returns (euint256 packed, euint256 struckMask) {
-        euint256 count = e.randBounded(uint256(maxCells - minCells) + 1).add(uint256(minCells));
+    function _pickAllAreaSlots(AreaGeometry memory area, PlayerSlot storage defender, StrikeConfig memory config)
+        internal
+        returns (euint256 packed, euint256 struckMask)
+    {
+        euint256 count = e.randBounded(uint256(config.maxCells - config.minCells) + 1).add(uint256(config.minCells));
         euint256 avoid = e.asEuint256(defender.shotsAgainstMe);
         struckMask = e.asEuint256(uint256(0));
         packed = e.asEuint256(uint256(0));
 
-        for (uint8 k = 0; k < maxCells; k++) {
-            ebool isActive = k < minCells ? e.asEbool(true) : count.gt(uint256(k));
-            BarrageSlotResult memory r =
-                _pickBarrageSlot(anchorRow, anchorCol, k, isActive, avoid, defender, areaSize, attemptsPerCell);
+        for (uint8 k = 0; k < config.maxCells; k++) {
+            ebool isActive = k < config.minCells ? e.asEbool(true) : count.gt(uint256(k));
+            AreaSlotResult memory r = _pickAreaSlot(area, k, isActive, avoid, defender, config);
             avoid = r.newAvoid;
             packed = packed.or(r.packedSlot);
             struckMask = struckMask.or(r.struckContribution);
@@ -215,7 +246,7 @@ library CiphertideMechanics {
     ///      computes the newly sunk mask and win bit, the same pattern as
     ///      a normal shot but against a multi-bit struck mask instead of a
     ///      single cell.
-    function _applyBarrageShipDamage(PlayerSlot storage defender, euint256 struckMask)
+    function _applyAreaShipDamage(PlayerSlot storage defender, euint256 struckMask)
         internal
         returns (euint256 newlyDestroyed, ebool allDestroyed)
     {
@@ -238,29 +269,27 @@ library CiphertideMechanics {
         }
     }
 
-    /// @dev Tries attemptsPerCell independent random cells within the
-    ///      areaSize x areaSize area for one barrage slot, avoiding every
-    ///      cell already claimed by an earlier slot this barrage or already
-    ///      shot on a previous action, keeping the first non-overlapping
-    ///      candidate. Packs the local position and a result code (0 if
-    ///      this slot never found a free candidate or the random count did
-    ///      not reach it, 1 miss, 2 ship hit, 3 mine, 4 shield break) into
-    ///      one 7 bit value: 4 bit local position plus a 3 bit code.
-    function _pickBarrageSlot(
-        uint8 anchorRow,
-        uint8 anchorCol,
+    /// @dev Tries config.attemptsPerCell independent random cells within
+    ///      the area for one slot, avoiding every cell already claimed by
+    ///      an earlier slot this action or already shot on a previous
+    ///      action, keeping the first non-overlapping candidate. Packs the
+    ///      local position and a result code (0 if this slot never found a
+    ///      free candidate or the random count did not reach it, 1 miss, 2
+    ///      ship hit, 3 mine, 4 shield break) into one
+    ///      (config.positionBits + 3) bit value: config.positionBits bits
+    ///      of local position plus a 3 bit code.
+    function _pickAreaSlot(
+        AreaGeometry memory area,
         uint8 slotIndex,
         ebool isActive,
         euint256 avoidSoFar,
         PlayerSlot storage defender,
-        uint8 areaSize,
-        uint8 attemptsPerCell
-    ) internal returns (BarrageSlotResult memory r) {
+        StrikeConfig memory config
+    ) internal returns (AreaSlotResult memory r) {
         euint256 localPos;
         euint256 candidateMask;
         ebool found;
-        (r.newAvoid, localPos, candidateMask, found) =
-            _findDistinctBarrageCell(anchorRow, anchorCol, avoidSoFar, areaSize, attemptsPerCell);
+        (r.newAvoid, localPos, candidateMask, found) = _findDistinctAreaCell(area, avoidSoFar, config.attemptsPerCell);
 
         ebool trulyActive = isActive.and(found);
         // Same shield check as a normal shot, against this slot's candidate
@@ -269,9 +298,11 @@ library CiphertideMechanics {
         // only needs to run when one is actually up.
         ebool shieldBreak =
             defender.shieldActive ? trulyActive.and(candidateMask.eq(defender.shieldCellMask)) : e.asEbool(false);
-        euint256 code = _barrageResultCode(trulyActive, shieldBreak, candidateMask, defender.mineMask, defender.boardMask);
+        euint256 code = _areaResultCode(trulyActive, shieldBreak, candidateMask, defender.mineMask, defender.boardMask);
 
-        r.packedSlot = localPos.or(code.shl(uint256(4))).shl(uint256(slotIndex) * 7);
+        r.packedSlot = localPos.or(code.shl(uint256(config.positionBits))).shl(
+            uint256(slotIndex) * (uint256(config.positionBits) + 3)
+        );
         // A broken shield does no damage, exactly like it never happened,
         // so its contribution to the aggregate struck mask is zeroed here
         // even though the slot itself was truly active.
@@ -279,24 +310,20 @@ library CiphertideMechanics {
         r.struckContribution = countsAsStruck.select(candidateMask, e.asEuint256(uint256(0)));
     }
 
-    /// @dev Runs the bounded-attempt retry to find one cell in the
-    ///      areaSize x areaSize area distinct from every cell in
-    ///      avoidSoFar, split out to keep _pickBarrageSlot's stack frame
-    ///      small.
-    function _findDistinctBarrageCell(
-        uint8 anchorRow,
-        uint8 anchorCol,
-        euint256 avoidSoFar,
-        uint8 areaSize,
-        uint8 attemptsPerCell
-    ) internal returns (euint256 newAvoid, euint256 localPos, euint256 candidateMask, ebool found) {
+    /// @dev Runs the bounded-attempt retry to find one cell in the area
+    ///      distinct from every cell in avoidSoFar, split out to keep
+    ///      _pickAreaSlot's stack frame small.
+    function _findDistinctAreaCell(AreaGeometry memory area, euint256 avoidSoFar, uint8 attemptsPerCell)
+        internal
+        returns (euint256 newAvoid, euint256 localPos, euint256 candidateMask, ebool found)
+    {
         localPos = e.asEuint256(uint256(0));
         candidateMask = e.asEuint256(uint256(0));
         found = e.asEbool(false);
 
         for (uint8 attempt = 0; attempt < attemptsPerCell; attempt++) {
-            euint256 idx = e.randBounded(uint256(areaSize) * uint256(areaSize));
-            euint256 candidateBit = e.asEuint256(uint256(1)).shl(_localToGlobalCell(idx, anchorRow, anchorCol, areaSize));
+            euint256 idx = e.randBounded(uint256(area.width) * uint256(area.height));
+            euint256 candidateBit = e.asEuint256(uint256(1)).shl(_localToGlobalCell(idx, area));
 
             ebool accept = found.not().and(candidateBit.and(avoidSoFar).eq(uint256(0)));
 
@@ -308,14 +335,14 @@ library CiphertideMechanics {
         newAvoid = avoidSoFar;
     }
 
-    /// @dev Classifies one barrage candidate cell into a result code: 0
+    /// @dev Classifies one area-strike candidate cell into a result code: 0
     ///      inactive, 1 miss, 2 ship hit, 3 mine, 4 shield break. A shield
     ///      break takes priority over every other code: it does not damage
     ///      the ship and is not a mine (mines and ship cells are disjoint
     ///      by placement, and the shield only ever guards a ship cell, so
     ///      this never actually conflicts with the mine code, the check is
     ///      kept explicit to stay safe either way).
-    function _barrageResultCode(
+    function _areaResultCode(
         ebool trulyActive,
         ebool shieldBreak,
         euint256 candidateMask,
@@ -330,12 +357,13 @@ library CiphertideMechanics {
         return trulyActive.select(code, e.asEuint256(uint256(0)));
     }
 
-    function _localToGlobalCell(euint256 localIdx, uint8 anchorRow, uint8 anchorCol, uint8 areaSize)
-        internal
-        returns (euint256)
-    {
-        euint256 localRow = localIdx.div(uint256(areaSize));
-        euint256 localCol = localIdx.rem(uint256(areaSize));
-        return localRow.add(uint256(anchorRow)).mul(uint256(BOARD_SIZE)).add(localCol.add(uint256(anchorCol)));
+    /// @dev area.width is the area's row stride for decoding a local index
+    ///      back into a local row and column, area.height only bounded the
+    ///      random draw that produced localIdx in _findDistinctAreaCell.
+    function _localToGlobalCell(euint256 localIdx, AreaGeometry memory area) internal returns (euint256) {
+        euint256 localRow = localIdx.div(uint256(area.width));
+        euint256 localCol = localIdx.rem(uint256(area.width));
+        return
+            localRow.add(uint256(area.anchorRow)).mul(uint256(BOARD_SIZE)).add(localCol.add(uint256(area.anchorCol)));
     }
 }

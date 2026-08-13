@@ -28,6 +28,7 @@ struct PlayerSlot {
     bool bonusShotAvailable; // set when the opponent triggers one of this player's mines
     bool sonarUsed;
     bool barrageUsed;
+    bool bombardmentUsed; // gates useBombardment to once per match, captain 2 only
     bool shieldUsed; // gates placeShield to once per match, captain 1 only
     euint256 shieldCellMask; // encrypted single-bit mask of the shielded cell, 0 if none or invalid
     // Public on purpose: whether a shield has been committed is not a
