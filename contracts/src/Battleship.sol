@@ -99,6 +99,9 @@ contract Battleship {
         bool bonusShotAvailable; // set when the opponent triggers one of this player's mines
         bool sonarUsed;
         bool barrageUsed;
+        bool shieldUsed; // gates placeShield to once per match, captain 1 only
+        euint256 shieldCellMask; // encrypted single-bit mask of the shielded cell, 0 if none or invalid
+        ebool shieldActive; // true while a valid shield is armed and not yet consumed
     }
 
     /// At most one action (a normal shot, sonar, or barrage) can be in
@@ -165,6 +168,7 @@ contract Battleship {
         bytes32 allDestroyedHandle
     );
     event BarrageResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine);
+    event ShieldPlaced(uint256 indexed matchId, address indexed player);
     event MatchWon(uint256 indexed matchId, address indexed winner);
     event TimeoutClaimed(uint256 indexed matchId, address indexed claimant);
 
@@ -277,6 +281,13 @@ contract Battleship {
         euint256 zeroDestroyed = e.asEuint256(uint256(0));
         zeroDestroyed.allowThis();
         p.lastDestroyedMask = zeroDestroyed;
+
+        euint256 zeroShieldCell = e.asEuint256(uint256(0));
+        zeroShieldCell.allowThis();
+        p.shieldCellMask = zeroShieldCell;
+        ebool shieldInactive = e.asEbool(false);
+        shieldInactive.allowThis();
+        p.shieldActive = shieldInactive;
 
         p.placementPending = true;
         p.pendingAllPlaced = allPlaced;
@@ -454,6 +465,13 @@ contract Battleship {
         zeroMines.allowThis();
         p.mineMask = zeroMines;
 
+        euint256 zeroShieldCell = e.asEuint256(uint256(0));
+        zeroShieldCell.allowThis();
+        p.shieldCellMask = zeroShieldCell;
+        ebool shieldInactive = e.asEbool(false);
+        shieldInactive.allowThis();
+        p.shieldActive = shieldInactive;
+
         if (m.players[0].placed && m.players[1].placed) {
             m.phase = Phase.AwaitingDiceRoll;
         }
@@ -559,6 +577,72 @@ contract Battleship {
         require(m.players[playerIdx].captain == requiredCaptainId, "captain does not own this skill");
     }
 
+    /// @notice Captain Shield's unique skill: commits one of the caller's own
+    ///         ship cells as a hidden shield, single use per match. The first
+    ///         time the opponent hits that cell it resolves as a miss instead
+    ///         and the shield is consumed, but the cell itself is not burned.
+    /// @dev Free action: no phase change, no pending action, no clock charge.
+    ///      Callable only on the caller's own turn by the CAPTAIN_SHIELD
+    ///      player, once per match. The chosen cell arrives as a client
+    ///      encrypted euint256 input (a single bit mask), wrapped here with
+    ///      newEuint256. Validity (exactly one bit, and that bit is one of
+    ///      the caller's own ship cells) is checked obliviously: an invalid
+    ///      pick never reverts, it just leaves the shield inactive, so the
+    ///      choice itself is never leaked through control flow.
+    function placeShield(uint256 matchId, bytes calldata shieldCellInput) external payable onlyPlayer(matchId) {
+        Match storage m = matches[matchId];
+        require(m.phase == Phase.InProgress, "match not in progress");
+        uint8 playerIdx = msg.sender == m.players[0].addr ? 0 : 1;
+        require(playerIdx == m.turn, "not your turn");
+        _requireCaptainOwnsSkill(m, playerIdx, CAPTAIN_SHIELD);
+
+        PlayerSlot storage p = m.players[playerIdx];
+        require(!p.shieldUsed, "shield already used");
+        p.shieldUsed = true;
+
+        require(msg.value >= inco.getFee(), "fee not paid");
+        euint256 cellMask = e.newEuint256(shieldCellInput, msg.sender);
+
+        ebool isValidPick = _isSingleOwnShipCell(cellMask, p.boardMask);
+        euint256 validatedCellMask = isValidPick.select(cellMask, e.asEuint256(uint256(0)));
+
+        validatedCellMask.allowThis();
+        validatedCellMask.allow(msg.sender);
+        isValidPick.allowThis();
+
+        p.shieldCellMask = validatedCellMask;
+        p.shieldActive = isValidPick;
+
+        emit ShieldPlaced(matchId, msg.sender);
+    }
+
+    /// @dev Obliviously checks that candidateMask has exactly one bit set
+    ///      (candidateMask != 0 and candidateMask & (candidateMask - 1) == 0,
+    ///      the standard single-bit trick) and that this single bit is part
+    ///      of ownBoardMask. Never branches or reverts on the encrypted
+    ///      result, only returns it for the caller to fold into a select.
+    function _isSingleOwnShipCell(euint256 candidateMask, euint256 ownBoardMask) internal returns (ebool) {
+        ebool nonZero = candidateMask.ne(uint256(0));
+        ebool singleBit = candidateMask.and(candidateMask.sub(uint256(1))).eq(uint256(0));
+        ebool isShipCell = candidateMask.and(ownBoardMask).eq(candidateMask);
+        return nonZero.and(singleBit).and(isShipCell);
+    }
+
+    /// @dev If shotBit is the defender's active shielded cell, consumes the
+    ///      shield obliviously and returns 0 in place of shotBit so the
+    ///      caller's hit detection and ship hit tracking treat this shot as
+    ///      landing nowhere, exactly like a real miss. Otherwise returns
+    ///      shotBit unchanged and leaves the shield state untouched.
+    function _applyShieldToShot(PlayerSlot storage defender, uint256 shotBit) internal returns (euint256) {
+        ebool shieldAbsorbs = defender.shieldActive.and(defender.shieldCellMask.eq(shotBit));
+
+        ebool newShieldActive = defender.shieldActive.and(shieldAbsorbs.not());
+        newShieldActive.allowThis();
+        defender.shieldActive = newShieldActive;
+
+        return shieldAbsorbs.select(e.asEuint256(uint256(0)), e.asEuint256(shotBit));
+    }
+
     function shoot(uint256 matchId, uint8 cell) external onlyPlayer(matchId) {
         require(cell < BOARD_CELLS, "cell out of range");
         Match storage m = matches[matchId];
@@ -567,10 +651,21 @@ contract Battleship {
         uint8 defenderIdx = 1 - m.turn;
         PlayerSlot storage defender = m.players[defenderIdx];
         require((defender.shotsAgainstMe >> cell) & 1 == 0, "cell already shot");
-        defender.shotsAgainstMe |= (uint256(1) << cell);
+        // Whether this cell gets burned into shotsAgainstMe is decided in
+        // confirmShot, once hit and mineHit are known in plaintext, see the
+        // comment there for why.
 
         uint256 shotBit = uint256(1) << cell;
-        ebool hit = defender.boardMask.and(shotBit).ne(uint256(0));
+
+        // If this cell is the defender's active shielded cell, the shot must
+        // resolve exactly like a real miss: the effective shot bit folded
+        // into hit detection and ship hit tracking below becomes 0, so the
+        // ship cell is never marked hit and the ship is never marked sunk
+        // from this shot, indistinguishable from shooting open water. The
+        // shield itself is consumed obliviously inside this call.
+        euint256 effectiveShotBit = _applyShieldToShot(defender, shotBit);
+
+        ebool hit = defender.boardMask.and(effectiveShotBit).ne(uint256(0));
         hit.allowThis();
 
         ebool mineHit = defender.mineMask.and(shotBit).ne(uint256(0));
@@ -582,8 +677,8 @@ contract Battleship {
             euint256 oldHits = defender.shipHits[i];
             ebool wasAlreadyDestroyed = oldHits.eq(defender.shipMask[i]);
 
-            ebool belongsToShip = defender.shipMask[i].and(shotBit).ne(uint256(0));
-            euint256 newHits = belongsToShip.select(oldHits.or(shotBit), oldHits);
+            ebool belongsToShip = defender.shipMask[i].and(effectiveShotBit).ne(uint256(0));
+            euint256 newHits = belongsToShip.select(oldHits.or(effectiveShotBit), oldHits);
             newHits.allowThis();
             defender.shipHits[i] = newHits;
 
@@ -651,6 +746,20 @@ contract Battleship {
         m.pendingAction = PendingAction.None;
         uint8 shooterIdx = m.pendingActor;
         address shooter = m.players[shooterIdx].addr;
+        PlayerSlot storage defender = m.players[1 - shooterIdx];
+
+        // Whether to burn this cell into shotsAgainstMe is decided here,
+        // after hit and mineHit are known in plaintext, and only on the
+        // same information a real miss would also reveal (hit, mineHit).
+        // A shielded absorb reveals hit=false and mineHit=false exactly
+        // like open water, so it is indistinguishable from a real miss in
+        // everything the shooter learns, and, like a real miss, does not
+        // burn the cell, which is exactly what lets it be shot again later.
+        // Ship hits and mine triggers still burn as before, so an already
+        // sunk ship cell or an already sprung mine can never be re-targeted.
+        if (hit || mineHit) {
+            defender.shotsAgainstMe |= (uint256(1) << m.pendingCell);
+        }
 
         if (mineHit) {
             // Grants the defender (the mine's owner) one extra action on
@@ -817,8 +926,16 @@ contract Battleship {
         returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
     {
         euint256 struckMask;
-        (packed, struckMask) = _pickAllBarrageSlots(anchorRow, anchorCol, defender);
+        ebool anyShieldHit;
+        (packed, struckMask, anyShieldHit) = _pickAllBarrageSlots(anchorRow, anchorCol, defender);
         (newlyDestroyed, allDestroyed) = _applyBarrageShipDamage(defender, struckMask);
+
+        // Same single-absorb rule as a normal shot: consume the shield the
+        // moment one of this barrage's slots lands on it, a no-op if it was
+        // never armed to begin with.
+        ebool newShieldActive = defender.shieldActive.and(anyShieldHit.not());
+        newShieldActive.allowThis();
+        defender.shieldActive = newShieldActive;
     }
 
     /// @dev Draws the random count and picks all six candidate slots.
@@ -826,21 +943,32 @@ contract Battleship {
     ///      small.
     function _pickAllBarrageSlots(uint8 anchorRow, uint8 anchorCol, PlayerSlot storage defender)
         internal
-        returns (euint256 packed, euint256 struckMask)
+        returns (euint256 packed, euint256 struckMask, ebool anyShieldHit)
     {
         euint256 count = e.randBounded(uint256(3)).add(uint256(4));
         euint256 avoid = e.asEuint256(defender.shotsAgainstMe);
         struckMask = e.asEuint256(uint256(0));
         packed = e.asEuint256(uint256(0));
+        anyShieldHit = e.asEbool(false);
 
         for (uint8 k = 0; k < BARRAGE_MAX_CELLS; k++) {
             ebool isActive = k < BARRAGE_MIN_CELLS ? e.asEbool(true) : count.gt(uint256(k));
-            (euint256 newAvoid, euint256 packedSlot, euint256 struckContribution) =
-                _pickBarrageSlot(anchorRow, anchorCol, k, isActive, avoid, defender);
-            avoid = newAvoid;
-            packed = packed.or(packedSlot);
-            struckMask = struckMask.or(struckContribution);
+            BarrageSlotResult memory r = _pickBarrageSlot(anchorRow, anchorCol, k, isActive, avoid, defender);
+            avoid = r.newAvoid;
+            packed = packed.or(r.packedSlot);
+            struckMask = struckMask.or(r.struckContribution);
+            anyShieldHit = anyShieldHit.or(r.shieldHitsThisSlot);
         }
+    }
+
+    /// @dev Bundles one barrage slot's outputs into memory instead of four
+    ///      separate stack return values, keeping _pickAllBarrageSlots'
+    ///      stack frame within the EVM's local variable limit.
+    struct BarrageSlotResult {
+        euint256 newAvoid;
+        euint256 packedSlot;
+        euint256 struckContribution;
+        ebool shieldHitsThisSlot;
     }
 
     /// @dev Folds the struck cells into each ship's hit tracking and
@@ -884,17 +1012,27 @@ contract Battleship {
         ebool isActive,
         euint256 avoidSoFar,
         PlayerSlot storage defender
-    ) internal returns (euint256 newAvoid, euint256 packedSlot, euint256 struckContribution) {
+    ) internal returns (BarrageSlotResult memory r) {
         euint256 localPos;
         euint256 candidateMask;
         ebool found;
-        (newAvoid, localPos, candidateMask, found) = _findDistinctBarrageCell(anchorRow, anchorCol, avoidSoFar);
+        (r.newAvoid, localPos, candidateMask, found) = _findDistinctBarrageCell(anchorRow, anchorCol, avoidSoFar);
 
         ebool trulyActive = isActive.and(found);
-        euint256 code = _barrageResultCode(trulyActive, candidateMask, defender.mineMask, defender.boardMask);
+        // Same single-cell shield check as a normal shot, against this
+        // slot's candidate cell instead of a caller-supplied cell index.
+        r.shieldHitsThisSlot =
+            trulyActive.and(defender.shieldActive).and(defender.shieldCellMask.eq(candidateMask));
+        euint256 code = _barrageResultCode(
+            trulyActive, r.shieldHitsThisSlot, candidateMask, defender.mineMask, defender.boardMask
+        );
 
-        packedSlot = localPos.or(code.shl(uint256(4))).shl(uint256(slotIndex) * 6);
-        struckContribution = trulyActive.select(candidateMask, e.asEuint256(uint256(0)));
+        r.packedSlot = localPos.or(code.shl(uint256(4))).shl(uint256(slotIndex) * 6);
+        // A shielded slot must not count toward ship damage, exactly like
+        // it never happened, so its contribution to the aggregate struck
+        // mask is zeroed here even though the slot itself was truly active.
+        ebool countsAsStruck = trulyActive.and(r.shieldHitsThisSlot.not());
+        r.struckContribution = countsAsStruck.select(candidateMask, e.asEuint256(uint256(0)));
     }
 
     /// @dev Runs the bounded-attempt retry to find one cell in the 4x4 area
@@ -923,13 +1061,20 @@ contract Battleship {
     }
 
     /// @dev Classifies one barrage candidate cell into a result code: 0
-    ///      inactive, 1 miss, 2 ship hit, 3 mine.
-    function _barrageResultCode(ebool trulyActive, euint256 candidateMask, euint256 mineMask, euint256 boardMask)
-        internal
-        returns (euint256)
-    {
+    ///      inactive, 1 miss, 2 ship hit, 3 mine. A shielded cell always
+    ///      classifies as a miss (code 1), never as a ship hit, regardless
+    ///      of it genuinely being a ship cell; mines and ship cells are
+    ///      disjoint by placement so this never conflicts with the mine
+    ///      code, but the check is kept explicit to stay safe either way.
+    function _barrageResultCode(
+        ebool trulyActive,
+        ebool shieldHitsThisSlot,
+        euint256 candidateMask,
+        euint256 mineMask,
+        euint256 boardMask
+    ) internal returns (euint256) {
         ebool isMine = candidateMask.and(mineMask).ne(uint256(0));
-        ebool isShipHit = candidateMask.and(boardMask).ne(uint256(0));
+        ebool isShipHit = candidateMask.and(boardMask).ne(uint256(0)).and(shieldHitsThisSlot.not());
         return trulyActive.select(
             isMine.select(
                 e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1)))
@@ -962,7 +1107,13 @@ contract Battleship {
                 (localPos / BARRAGE_AREA_SIZE + m.pendingBarrageAnchorRow) * BOARD_SIZE
                     + (localPos % BARRAGE_AREA_SIZE + m.pendingBarrageAnchorCol)
             );
-            defender.shotsAgainstMe |= (uint256(1) << globalCell);
+            // Only a genuine ship hit or a mine burns the cell, matching
+            // confirmShot: a plain miss (code 1), including a shielded
+            // absorb forced to read as a miss, leaves the cell unburned so
+            // it can be struck again later, exactly like a real miss would.
+            if (code == 2 || code == 3) {
+                defender.shotsAgainstMe |= (uint256(1) << globalCell);
+            }
             if (code == 3) {
                 anyMineTriggered = true;
             }
@@ -1096,5 +1247,13 @@ contract Battleship {
 
     function hasBarrageCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
         return !matches[matchId].players[playerIdx].barrageUsed;
+    }
+
+    function hasShieldCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return !matches[matchId].players[playerIdx].shieldUsed;
+    }
+
+    function getShieldCellHandle(uint256 matchId, uint8 playerIdx) external view returns (euint256) {
+        return matches[matchId].players[playerIdx].shieldCellMask;
     }
 }

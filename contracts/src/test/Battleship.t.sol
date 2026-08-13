@@ -677,4 +677,177 @@ contract BattleshipTest is IncoTest {
 
         assertTrue(sawBothInSameBarrage, "expected at least one barrage to land both a ship hit and a mine");
     }
+
+    /// @dev Fires a shot known to miss (an empty cell on the defender's
+    /// board) purely to pass the turn, and confirms it.
+    function _passTurnWithMiss(uint256 matchId, address shooter, uint8 waterCell) internal {
+        vm.prank(shooter);
+        game.shoot(matchId, waterCell);
+        processAllOperations();
+        _confirmPendingShot(matchId, shooter);
+    }
+
+    function _shieldCiphertext(uint256 cellMaskValue, address owner) internal view returns (bytes memory) {
+        return fakePrepareEuint256Ciphertext(cellMaskValue, owner, address(game));
+    }
+
+    /// @dev Places a shield on cellIdx as player, fee and ciphertext built
+    /// before the prank so the prank is not consumed by the intermediate
+    /// inco.getFee() call (see _rollDiceOnce for the same pattern).
+    function _placeShield(uint256 matchId, address player, uint8 cellIdx) internal {
+        uint256 fee = inco.getFee();
+        bytes memory ciphertext = _shieldCiphertext(uint256(1) << cellIdx, player);
+        vm.deal(player, 1 ether);
+        vm.prank(player);
+        game.placeShield{value: fee}(matchId, ciphertext);
+    }
+
+    function testShieldAbsorbsFirstHitAndCellSurvivesForSecondHit() public {
+        // alice is CAPTAIN_SHIELD in _createAndJoinMatch. Her board is the
+        // standard test layout, so cell 0 is a real ship cell (ship 0).
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+
+        // Get it to alice's turn so she can place her shield.
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        assertEq(game.getTurn(matchId), alice, "expected alice's turn before placing the shield");
+
+        _placeShield(matchId, alice, 0);
+        processAllOperations();
+
+        // placeShield is a free action, alice still has the turn; spend it
+        // on a genuine miss against bob's tiny-ships board so the turn
+        // passes to bob, who then fires at the shielded cell.
+        _passTurnWithMiss(matchId, alice, 100);
+        assertEq(game.getTurn(matchId), bob, "turn should have passed to bob");
+
+        vm.prank(bob);
+        game.shoot(matchId, 0);
+        processAllOperations();
+        _confirmPendingShot(matchId, bob);
+
+        // The shield absorbed the hit: it reveals as a miss, so the turn
+        // passes back to alice exactly like shooting open water.
+        assertEq(game.getTurn(matchId), alice, "a shielded absorb should read as a miss and pass the turn");
+
+        // The cell survived (it was not burned), so alice can pass the turn
+        // back and bob can hit cell 0 again, this time for real.
+        _passTurnWithMiss(matchId, alice, 101);
+        assertEq(game.getTurn(matchId), bob, "turn should have passed back to bob");
+
+        vm.prank(bob);
+        game.shoot(matchId, 0);
+        processAllOperations();
+        _confirmPendingShot(matchId, bob);
+
+        // A genuine hit keeps the shooter's turn.
+        assertEq(game.getTurn(matchId), bob, "the second shot on the same cell should resolve as a real hit");
+    }
+
+    function testShieldIsSingleUsePerMatch() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        _placeShield(matchId, alice, 0);
+        processAllOperations();
+
+        assertFalse(game.hasShieldCharge(matchId, 0), "shield charge should be spent after one placement");
+
+        uint256 fee = inco.getFee();
+        bytes memory ciphertext = _shieldCiphertext(uint256(1) << 1, alice);
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert("shield already used");
+        game.placeShield{value: fee}(matchId, ciphertext);
+    }
+
+    function testOpponentCannotReadTheShieldedCellHandle() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        _placeShield(matchId, alice, 0);
+        processAllOperations();
+
+        euint256 handle = game.getShieldCellHandle(matchId, 0);
+        assertTrue(e.isAllowed(alice, handle), "the owning player should keep access to their own shielded cell");
+        assertFalse(e.isAllowed(bob, handle), "the opponent must never be allowed to read the shielded cell");
+    }
+
+    function testOnlyCaptainShieldCanPlaceShield() public {
+        uint8 bombardment = game.CAPTAIN_BOMBARDMENT();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        vm.prank(alice);
+        uint256 matchId = game.createMatch(bombardment);
+        vm.prank(bob);
+        game.joinMatch(matchId, shieldCaptain);
+
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        (uint256 board1, uint256[6] memory ships1) = _tinyShipsBoard();
+        game.setBoardForTesting(matchId, 0, board0, ships0);
+        game.setBoardForTesting(matchId, 1, board1, ships1);
+        processAllOperations();
+        _rollAndConfirmDiceUntilDecided(matchId, alice);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        uint256 fee = inco.getFee();
+        bytes memory ciphertext = _shieldCiphertext(uint256(1) << 0, alice);
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert("captain does not own this skill");
+        game.placeShield{value: fee}(matchId, ciphertext);
+    }
+
+    function testInvalidWaterPickLeavesNoActiveShieldAndLaterHitsResolveNormally() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        // Cell 200 is water on alice's standard test board, an invalid pick
+        // for the ship-cell-only shield.
+        _placeShield(matchId, alice, 200);
+        processAllOperations();
+
+        _passTurnWithMiss(matchId, alice, 100);
+        assertEq(game.getTurn(matchId), bob, "turn should have passed to bob");
+
+        // A real ship cell should still resolve as a genuine hit, proving
+        // the invalid pick never armed the shield.
+        vm.prank(bob);
+        game.shoot(matchId, 1);
+        processAllOperations();
+        _confirmPendingShot(matchId, bob);
+
+        assertEq(game.getTurn(matchId), bob, "an unshielded ship cell should hit normally and keep the turn");
+    }
+
+    function testPlacingShieldDoesNotPassTurnOrChargeTheClock() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        uint256 remainingBefore = game.getRemainingTime(matchId, 0);
+        uint256 lastMoveBefore = game.getLastMoveTimestamp(matchId);
+
+        vm.warp(block.timestamp + 10);
+        _placeShield(matchId, alice, 0);
+        processAllOperations();
+
+        assertEq(game.getTurn(matchId), alice, "placing a shield should not pass the turn");
+        assertEq(game.getRemainingTime(matchId, 0), remainingBefore, "placing a shield should not charge the clock");
+        assertEq(game.getLastMoveTimestamp(matchId), lastMoveBefore, "placing a shield should not reset the clock");
+    }
 }
