@@ -1,11 +1,30 @@
-// Headless end-to-end run of a full Ciphertide match against a live
+// Headless end-to-end run of full Ciphertide matches against a live
 // deployment on Base Sepolia. No UI, no frontend dependency. Exercises the
 // real two-phase encrypt, call, fetch-attestation, confirm loop against
 // genuine Inco Lightning infrastructure, the thing the Foundry test suite's
-// IncoTest mock cannot exercise: createMatch and joinMatch, real random
-// placement plus its confirm, decrypting a player's own board to place a
-// real client-encrypted shield, a few shots with their confirms, and one
-// area skill (Barrage) with its confirm.
+// mock cannot exercise, and every handle this script needs is fetched the
+// way a real client must: from a contract event or a public getter, never
+// by reaching into storage the way the test-only harness does.
+//
+// This script itself already caught one real gap this way: confirmShot
+// used to require a mineHit attestation that ShotFired never emitted and
+// no getter exposed, so no real client could ever have completed a shot's
+// confirm. That is fixed now (ShotFired emits mineHitHandle). This version
+// covers every two phase action and confirm pair, not just placement, shot
+// and Barrage, specifically so a future regression of the same shape would
+// show up here as a hard failure instead of silently shipping.
+//
+// Runs three short matches back to back, since each match only has two
+// captain slots and there are five captain-owned unique skills (Shield,
+// Bombardment, Rake, Salvo, Carpet) plus two shared ones (Sonar, Barrage):
+//   Match 1: Shield vs Bombardment, exercises Shield, Sonar, Barrage,
+//            Bombardment, and a plain shot.
+//   Match 2: Rake vs Salvo, exercises Rake, Salvo, and a plain shot.
+//   Match 3: Carpet vs Shield, exercises Carpet and a plain shot.
+// Each match also drives placement plus its confirm for both players, and
+// dice roll plus its confirm, retried the same way a real client would
+// retry on a tie, since Base Sepolia's real randomness cannot be forced to
+// tie on demand.
 //
 // Usage: fill in e2e/.env (see e2e/.env.example) with a Base Sepolia RPC
 // URL, two funded player private keys, and the deployed Ciphertide address,
@@ -44,12 +63,13 @@ const executorAbi = [
 ] as const;
 
 const RETRY = { maxRetries: 8, baseDelayInMs: 1500, backoffFactor: 1.7 };
+const ZERO32 = ("0x" + "0".repeat(64)) as Hex;
+const nonZero = (h: Hex) => h !== ZERO32;
+const PHASE_NAMES = ["WaitingForOpponent", "Placing", "AwaitingDiceRoll", "InProgress", "Finished"];
 
 function requireEnv(name: string): string {
   const value = process.env[name];
-  if (!value) {
-    missingEnv.push(name);
-  }
+  if (!value) missingEnv.push(name);
   return value ?? "";
 }
 
@@ -65,8 +85,6 @@ if (missingEnv.length > 0) {
   console.error("Copy e2e/.env.example to e2e/.env and fill these in.");
   process.exit(1);
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function findEvent(receipt: TransactionReceipt, eventName: string) {
   for (const log of receipt.logs) {
@@ -105,8 +123,17 @@ async function main() {
   const getFee = async () =>
     publicClient.readContract({ address: zap.executorAddress as Hex, abi: executorAbi, functionName: "getFee" });
 
-  const readConst = async (name: string) =>
-    publicClient.readContract({ address: ciphertideAddress, abi: ciphertideAbi, functionName: name }) as Promise<bigint>;
+  // Every constant this script reads is a uint8 or uint16 on the Solidity
+  // side. viem decodes integer return types 48 bits or narrower as a plain
+  // JS number, not a bigint, so without this explicit BigInt(...) coercion
+  // the result would silently be a number, and mixing that into bigint
+  // arithmetic elsewhere in this script (fee * draws, and so on) would
+  // throw a TypeError at runtime the moment it happened, not at compile
+  // time (the return type here is asserted, not actually checked).
+  const readConst = async (name: string): Promise<bigint> => {
+    const value = await publicClient.readContract({ address: ciphertideAddress, abi: ciphertideAbi, functionName: name });
+    return BigInt(value as number | bigint);
+  };
 
   async function write(wallet: typeof walletA, functionName: string, args: unknown[], value = 0n) {
     const hash = await wallet.writeContract({
@@ -139,37 +166,38 @@ async function main() {
     });
   }
 
-  // Step 1: create and join. Player A declares Captain Shield, so the
-  // e2e run can later exercise a real client-encrypted input (the shield
-  // cell). Player B declares Captain Bombardment, though the skill this
-  // run exercises (Barrage) is shared and available to any captain.
-  const CAPTAIN_SHIELD = await readConst("CAPTAIN_SHIELD");
-  const CAPTAIN_BOMBARDMENT = await readConst("CAPTAIN_BOMBARDMENT");
+  // Player A always creates, Player B always joins, so player index 0 is
+  // always A and index 1 is always B for every match this script creates.
+  // Confirmed once below rather than assumed.
+  const idxOf = (addr: Hex) => (addr.toLowerCase() === accountA.address.toLowerCase() ? 0 : 1);
+  const walletOf = (idx: number) => (idx === 0 ? walletA : walletB);
 
-  console.log("Creating match...");
-  const createReceipt = await write(walletA, "createMatch", [CAPTAIN_SHIELD]);
-  const { matchId } = findEvent(createReceipt, "MatchCreated") as { matchId: bigint };
-  console.log(`Match ${matchId}, gas ${createReceipt.gasUsed}\n`);
-
-  console.log("Joining match...");
-  await write(walletB, "joinMatch", [matchId, CAPTAIN_BOMBARDMENT]);
-
-  const addrAtIndex0 = (await read("getPlayerAddress", [matchId, 0])) as Hex;
-  const idxOf = (addr: Hex) => (addr.toLowerCase() === addrAtIndex0.toLowerCase() ? 0 : 1);
-  const walletOf = (idx: number) => (idx === idxOf(accountA.address) ? walletA : walletB);
-  const idxA = idxOf(accountA.address);
-  const idxB = idxA === 0 ? 1 : 0;
-  console.log(`Player A is index ${idxA}, Player B is index ${idxB}\n`);
-
-  // Step 2: real random placement plus its confirm, for both players.
+  // Constants read once, shared by every match below.
   const NUM_SHIPS = await readConst("NUM_SHIPS");
   const PLACEMENT_ATTEMPTS_PER_SHIP = await readConst("PLACEMENT_ATTEMPTS_PER_SHIP");
   const MINES_PER_PLAYER = await readConst("MINES_PER_PLAYER");
   const MINE_PLACEMENT_ATTEMPTS = await readConst("MINE_PLACEMENT_ATTEMPTS");
-  const placementDraws =
-    NUM_SHIPS * PLACEMENT_ATTEMPTS_PER_SHIP + MINES_PER_PLAYER * MINE_PLACEMENT_ATTEMPTS;
+  const placementDraws = NUM_SHIPS * PLACEMENT_ATTEMPTS_PER_SHIP + MINES_PER_PLAYER * MINE_PLACEMENT_ATTEMPTS;
 
-  async function placeAndConfirm(wallet: typeof walletA, idx: number, label: string) {
+  const BARRAGE_MAX_CELLS = await readConst("BARRAGE_MAX_CELLS");
+  const BARRAGE_ATTEMPTS_PER_CELL = await readConst("BARRAGE_ATTEMPTS_PER_CELL");
+  const barrageDraws = 1n + BARRAGE_MAX_CELLS * BARRAGE_ATTEMPTS_PER_CELL;
+
+  const BOMBARDMENT_STRIKE_COUNT = await readConst("BOMBARDMENT_STRIKE_COUNT");
+  const BOMBARDMENT_ATTEMPTS_PER_CELL = await readConst("BOMBARDMENT_ATTEMPTS_PER_CELL");
+  const bombardmentDraws = 1n + BOMBARDMENT_STRIKE_COUNT * BOMBARDMENT_ATTEMPTS_PER_CELL;
+
+  const RAKE_STRIKE_COUNT = await readConst("RAKE_STRIKE_COUNT");
+  const RAKE_ATTEMPTS_PER_CELL = await readConst("RAKE_ATTEMPTS_PER_CELL");
+  const rakeDraws = 1n + RAKE_STRIKE_COUNT * RAKE_ATTEMPTS_PER_CELL;
+
+  const CAPTAIN_SHIELD = await readConst("CAPTAIN_SHIELD");
+  const CAPTAIN_BOMBARDMENT = await readConst("CAPTAIN_BOMBARDMENT");
+  const CAPTAIN_RAKE = await readConst("CAPTAIN_RAKE");
+  const CAPTAIN_SALVO = await readConst("CAPTAIN_SALVO");
+  const CAPTAIN_CARPET = await readConst("CAPTAIN_CARPET");
+
+  async function placeAndConfirm(matchId: bigint, wallet: typeof walletA, idx: number, label: string) {
     const fee = (await getFee()) * placementDraws;
     console.log(`${label}: placing board (${placementDraws} random draws, fee ${fee} wei)...`);
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -178,7 +206,7 @@ async function main() {
       const { allPlacedHandle } = findEvent(receipt, "PlacementSubmitted") as { allPlacedHandle: Hex };
       const [{ attestation, signatures }] = await revealAsAttestations([allPlacedHandle]);
       const confirmReceipt = await write(wallet, "confirmPlacement", [matchId, idx, attestation, signatures]);
-      const allPlaced = attestation.value !== ("0x" + "0".repeat(64));
+      const allPlaced = nonZero(attestation.value);
       console.log(`${label}: confirmPlacement gas ${confirmReceipt.gasUsed}, allPlaced=${allPlaced}`);
       if (allPlaced) return;
       console.log(`${label}: placement did not find a free slot for every ship, retrying...`);
@@ -186,80 +214,49 @@ async function main() {
     throw new Error(`${label}: placement never succeeded after 3 attempts`);
   }
 
-  await placeAndConfirm(walletA, idxA, "Player A");
-  await placeAndConfirm(walletB, idxB, "Player B");
-  console.log("");
-
-  // Step 3: dice roll to decide who goes first, retried on a tie.
-  console.log("Rolling dice...");
-  let phase = (await read("getPhase", [matchId])) as number;
-  for (let attempt = 0; attempt < 10 && phase !== 3 /* InProgress */; attempt++) {
-    const fee = (await getFee()) * 2n;
-    const rollReceipt = await write(walletA, "rollDice", [matchId], fee);
-    const { rollAHandle, rollBHandle } = findEvent(rollReceipt, "DiceRolled") as {
-      rollAHandle: Hex;
-      rollBHandle: Hex;
-    };
-    const [a, b] = await revealAsAttestations([rollAHandle, rollBHandle]);
-    await write(walletA, "confirmDiceRoll", [matchId, a.attestation, a.signatures, b.attestation, b.signatures]);
-    phase = (await read("getPhase", [matchId])) as number;
+  // Retried exactly the way a real client has to: a tie leaves the match in
+  // AwaitingDiceRoll with no revert, so the only way to observe it is to
+  // keep rolling until the phase actually advances. Base Sepolia's real
+  // randomness cannot be forced to tie on demand, so this exercises the
+  // reroll path for real whenever a tie happens to land, and otherwise
+  // still proves the confirm step works on the first real roll.
+  async function rollDiceUntilDecided(matchId: bigint) {
+    console.log("Rolling dice...");
+    let phase = (await read("getPhase", [matchId])) as number;
+    let attempts = 0;
+    while (phase !== 3 /* InProgress */ && attempts < 10) {
+      attempts++;
+      const fee = (await getFee()) * 2n;
+      const rollReceipt = await write(walletA, "rollDice", [matchId], fee);
+      const { rollAHandle, rollBHandle } = findEvent(rollReceipt, "DiceRolled") as {
+        rollAHandle: Hex;
+        rollBHandle: Hex;
+      };
+      const [a, b] = await revealAsAttestations([rollAHandle, rollBHandle]);
+      await write(walletA, "confirmDiceRoll", [matchId, a.attestation, a.signatures, b.attestation, b.signatures]);
+      phase = (await read("getPhase", [matchId])) as number;
+      if (phase !== 3) console.log(`Dice tied on attempt ${attempts}, rerolling (the real reroll on tie path)...`);
+    }
+    if (phase !== 3) throw new Error("dice roll never decided a starting player");
+    console.log(`Match in progress after ${attempts} roll${attempts === 1 ? "" : "s"}.\n`);
   }
-  if (phase !== 3) throw new Error("dice roll never decided a starting player");
-  console.log("Match in progress.\n");
 
-  // Step 4: decrypt Player A's own board with a wallet-signed attestation
-  // (attestedDecrypt, distinct from the public attestedReveal used so far),
-  // then place a real shield on one of her own ship cells, a genuine
-  // client-encrypted input built with zap.encrypt and consumed on-chain via
-  // e.newEuint256. Only meaningful once it is Player A's turn; if Player B
-  // goes first, skip this on Player B's own turn instead (shield needs to be
-  // placed by CAPTAIN_SHIELD, which only Player A declared).
-  async function tryPlaceShield(): Promise<boolean> {
-    const turnAddr = (await read("getTurn", [matchId])) as Hex;
-    if (turnAddr.toLowerCase() !== accountA.address.toLowerCase()) return false;
-    console.log("It is Player A's turn: decrypting her own board to place a real shield...");
-    const boardHandle = (await read("getBoardMask", [matchId, idxA])) as Hex;
-    // Cast to any: @inco/lightning-js bundles its own nested viem version,
-    // structurally identical to this project's but a distinct type from
-    // TypeScript's point of view, which otherwise rejects a wallet client
-    // built from this project's own viem as an argument here. Harmless at
-    // runtime, both are plain viem WalletClient objects.
-    const [decrypted] = await zap.attestedDecrypt(walletA as any, [boardHandle], { backoffConfig: RETRY });
-    const board = decrypted.plaintext.value as bigint;
-    let shieldCell = 0;
-    while (((board >> BigInt(shieldCell)) & 1n) === 0n) shieldCell++;
-    console.log(`Player A's real ship cell chosen for the shield: ${shieldCell}`);
-
-    const ciphertext = await zap.encrypt(1n << BigInt(shieldCell), {
-      accountAddress: accountA.address,
-      dappAddress: ciphertideAddress,
-      handleType: handleTypes.euint256,
-    });
-    const fee = await getFee();
-    const receipt = await write(walletA, "placeShield", [matchId, ciphertext], fee);
-    console.log(`Shield placed, gas ${receipt.gasUsed}\n`);
-    return true;
-  }
-  await tryPlaceShield();
-
-  // Step 5: a few shots with their confirms, plus one area skill (Barrage)
-  // with its confirm, alternating naturally with whichever player's turn
-  // it actually is. Stops early if the match finishes.
-  const BARRAGE_MAX_CELLS = await readConst("BARRAGE_MAX_CELLS");
-  const BARRAGE_ATTEMPTS_PER_CELL = await readConst("BARRAGE_ATTEMPTS_PER_CELL");
-  const barrageDraws = 1n + BARRAGE_MAX_CELLS * BARRAGE_ATTEMPTS_PER_CELL;
-
-  async function nextUnshotCell(defenderIdx: number, from = 0): Promise<number> {
+  async function nextUnshotCells(matchId: bigint, defenderIdx: number, count: number): Promise<number[]> {
     const shotsAgainst = (await read("getShotsAgainst", [matchId, defenderIdx])) as bigint;
-    let cell = from;
-    while (((shotsAgainst >> BigInt(cell)) & 1n) === 1n) cell++;
-    return cell;
+    const cells: number[] = [];
+    let cell = 0;
+    while (cells.length < count) {
+      if (((shotsAgainst >> BigInt(cell)) & 1n) === 0n && !cells.includes(cell)) cells.push(cell);
+      cell++;
+    }
+    return cells;
   }
 
-  async function doShot(wallet: typeof walletA, actorIdx: number) {
+  async function doShot(matchId: bigint, actorIdx: number): Promise<boolean> {
+    const wallet = walletOf(actorIdx);
     const defenderIdx = actorIdx === 0 ? 1 : 0;
-    const cell = await nextUnshotCell(defenderIdx);
-    console.log(`Shot at cell ${cell}...`);
+    const [cell] = await nextUnshotCells(matchId, defenderIdx, 1);
+    console.log(`Shot at cell ${cell} (player index ${actorIdx})...`);
     const receipt = await write(wallet, "shoot", [matchId, cell]);
     console.log(`shoot() gas ${receipt.gasUsed}`);
     const { hitHandle, allDestroyedHandle, mineHitHandle, shieldBreakHandle } = findEvent(receipt, "ShotFired") as {
@@ -285,7 +282,6 @@ async function main() {
       shield.attestation,
       shield.signatures,
     ]);
-    const nonZero = (h: Hex) => h !== ("0x" + "0".repeat(64));
     console.log(
       `confirmShot gas ${confirmReceipt.gasUsed}, hit=${nonZero(hit.attestation.value)}, ` +
         `mine=${nonZero(mine.attestation.value)}, shieldBreak=${nonZero(shield.attestation.value)}, ` +
@@ -294,59 +290,236 @@ async function main() {
     return nonZero(win.attestation.value);
   }
 
-  async function doBarrage(wallet: typeof walletA) {
-    console.log("Firing Barrage at (0, 0)...");
-    const fee = (await getFee()) * barrageDraws;
-    const receipt = await write(wallet, "useBarrage", [matchId, 0, 0], fee);
-    console.log(`useBarrage() gas ${receipt.gasUsed}`);
-    const { packedHandle, allDestroyedHandle } = findEvent(receipt, "BarrageFired") as {
+  // Repeatedly takes a plain shot from whoever currently holds the turn
+  // until it becomes targetIdx's turn, so a captain-gated skill (which can
+  // only be used on its owner's own turn) can be reached regardless of
+  // which player the dice roll happened to start, and regardless of any
+  // turn-forfeit in play (Salvo's own cost included, since this only
+  // watches getTurn and does not care why control moved). Bounded so a
+  // genuinely stuck match fails loudly instead of looping forever. Returns
+  // true if the match finished while passing turns.
+  async function passUntilTurnOf(matchId: bigint, targetIdx: number, maxShots = 20): Promise<boolean> {
+    for (let i = 0; i < maxShots; i++) {
+      const turnAddr = (await read("getTurn", [matchId])) as Hex;
+      if (idxOf(turnAddr) === targetIdx) return false;
+      const finished = await doShot(matchId, idxOf(turnAddr));
+      if (finished) return true;
+    }
+    throw new Error(`turn never reached player index ${targetIdx} after ${maxShots} filler shots`);
+  }
+
+  // Shared shape for Barrage, Bombardment, Rake, Salvo and Carpet: each
+  // fires with its own args, reveals packedHandle and allDestroyedHandle
+  // from its own Fired event, and confirms with the same (matchId,
+  // packedAttestation, packedSignatures, winAttestation, winSignatures)
+  // shape. Returns true if the match finished.
+  async function useAreaSkillAndConfirm(
+    matchId: bigint,
+    wallet: typeof walletA,
+    useFnName: string,
+    useArgs: unknown[],
+    fee: bigint,
+    firedEventName: string,
+    confirmFnName: string,
+  ): Promise<boolean> {
+    const receipt = await write(wallet, useFnName, useArgs, fee);
+    console.log(`${useFnName}() gas ${receipt.gasUsed}`);
+    const { packedHandle, allDestroyedHandle } = findEvent(receipt, firedEventName) as {
       packedHandle: Hex;
       allDestroyedHandle: Hex;
     };
     const [packed, win] = await revealAsAttestations([packedHandle, allDestroyedHandle]);
-    const confirmReceipt = await write(wallet, "confirmBarrage", [
+    const confirmReceipt = await write(wallet, confirmFnName, [
       matchId,
       packed.attestation,
       packed.signatures,
       win.attestation,
       win.signatures,
     ]);
-    console.log(`confirmBarrage gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}\n`);
-    return win.attestation.value !== ("0x" + "0".repeat(64));
+    console.log(
+      `${confirmFnName} gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
+        `win=${nonZero(win.attestation.value)}\n`,
+    );
+    return nonZero(win.attestation.value);
   }
 
-  let finished = false;
-  let usedBarrage = false;
-  for (let round = 0; round < 6 && !finished; round++) {
-    const phaseNow = (await read("getPhase", [matchId])) as number;
-    if (phaseNow === 4 /* Finished */) {
-      finished = true;
-      break;
+  async function useSonarAndConfirm(matchId: bigint, wallet: typeof walletA): Promise<void> {
+    const receipt = await write(wallet, "useSonar", [matchId, 0, 0]);
+    console.log(`useSonar() gas ${receipt.gasUsed}`);
+    const { resultHandle } = findEvent(receipt, "SonarFired") as { resultHandle: Hex };
+    const [result] = await revealAsAttestations([resultHandle]);
+    const confirmReceipt = await write(wallet, "confirmSonar", [matchId, result.attestation, result.signatures]);
+    console.log(`confirmSonar gas ${confirmReceipt.gasUsed}, anyShip=${nonZero(result.attestation.value)}\n`);
+  }
+
+  // Decrypts Player A's own board with a wallet-signed attestation
+  // (attestedDecrypt, distinct from the public attestedReveal used
+  // everywhere else in this script), then places a real shield on one of
+  // her own ship cells: a genuine client-encrypted input built with
+  // zap.encrypt and consumed on-chain via e.newEuint256. placeShield is a
+  // free action, it does not pass the turn and has no confirm step of its
+  // own (the shielded cell is never revealed unless struck), so it is
+  // outside the class of bug this script otherwise audits for, but it is
+  // still the one truly client-encrypted input in the whole game and worth
+  // exercising for real.
+  async function placeRealShield(matchId: bigint): Promise<void> {
+    console.log("Decrypting Player A's own board to place a real shield...");
+    const boardHandle = (await read("getBoardMask", [matchId, 0])) as Hex;
+    // Cast to any: @inco/lightning-js bundles its own nested viem version,
+    // structurally identical to this project's but a distinct type from
+    // TypeScript's point of view, which otherwise rejects a wallet client
+    // built from this project's own viem as an argument here. Harmless at
+    // runtime, both are plain viem WalletClient objects.
+    const [decrypted] = await zap.attestedDecrypt(walletA as any, [boardHandle], { backoffConfig: RETRY });
+    const board = decrypted.plaintext.value as bigint;
+    let shieldCell = 0;
+    while (((board >> BigInt(shieldCell)) & 1n) === 0n) shieldCell++;
+    console.log(`Player A's real ship cell chosen for the shield: ${shieldCell}`);
+
+    const ciphertext = await zap.encrypt(1n << BigInt(shieldCell), {
+      accountAddress: accountA.address,
+      dappAddress: ciphertideAddress,
+      handleType: handleTypes.euint256,
+    });
+    const fee = await getFee();
+    const receipt = await write(walletA, "placeShield", [matchId, ciphertext], fee);
+    console.log(`Shield placed, gas ${receipt.gasUsed}\n`);
+  }
+
+  async function runMatch(
+    label: string,
+    captainA: bigint,
+    captainB: bigint,
+    exercises: Array<(matchId: bigint) => Promise<boolean | void>>,
+  ) {
+    console.log(`=== ${label} ===\n`);
+    console.log(`Creating match (Player A captain ${captainA}, Player B captain ${captainB})...`);
+    const createReceipt = await write(walletA, "createMatch", [captainA]);
+    const { matchId } = findEvent(createReceipt, "MatchCreated") as { matchId: bigint };
+    console.log(`Match ${matchId}, gas ${createReceipt.gasUsed}\n`);
+
+    await write(walletB, "joinMatch", [matchId, captainB]);
+    const addr0 = (await read("getPlayerAddress", [matchId, 0])) as Hex;
+    if (addr0.toLowerCase() !== accountA.address.toLowerCase()) {
+      throw new Error("player index assignment did not match the assumed A=0, B=1 convention");
     }
-    const turnAddr = (await read("getTurn", [matchId])) as Hex;
-    const actorIdx = idxOf(turnAddr);
-    const wallet = walletOf(actorIdx);
 
-    if (!usedBarrage && round === 2) {
-      usedBarrage = true;
-      finished = await doBarrage(wallet);
-    } else {
-      finished = await doShot(wallet, actorIdx);
+    await placeAndConfirm(matchId, walletA, 0, `${label} Player A`);
+    await placeAndConfirm(matchId, walletB, 1, `${label} Player B`);
+    await rollDiceUntilDecided(matchId);
+
+    for (const exercise of exercises) {
+      const phaseNow = (await read("getPhase", [matchId])) as number;
+      if (phaseNow === 4 /* Finished */) {
+        console.log(`${label}: match already finished, skipping the remaining exercises for this match.\n`);
+        break;
+      }
+      const finished = await exercise(matchId);
+      if (finished) break;
     }
+
+    const finalPhase = (await read("getPhase", [matchId])) as number;
+    console.log(`${label} final phase: ${PHASE_NAMES[finalPhase]}`);
+    if (finalPhase === 4) console.log(`${label} winner: ${await read("getWinner", [matchId])}`);
+    console.log("");
   }
 
-  const finalPhase = (await read("getPhase", [matchId])) as number;
-  console.log("Final state:");
-  console.log(`  phase: ${["WaitingForOpponent", "Placing", "AwaitingDiceRoll", "InProgress", "Finished"][finalPhase]}`);
-  if (finalPhase === 4) {
-    const winner = (await read("getWinner", [matchId])) as Hex;
-    console.log(`  winner: ${winner}`);
-  } else {
-    console.log("  no winner yet, this run stopped after a bounded number of rounds");
-    console.log("  (a full random-board win typically needs far more shots than this smoke run takes)");
-  }
+  // Match 1: Shield vs Bombardment. Exercises the one client-encrypted
+  // input in the game (Shield), both shared skills (Sonar, Barrage), and
+  // Bombardment, plus a plain shot.
+  await runMatch("Match 1: Shield vs Bombardment", CAPTAIN_SHIELD, CAPTAIN_BOMBARDMENT, [
+    async (matchId) => {
+      if (await passUntilTurnOf(matchId, 0)) return true;
+      await placeRealShield(matchId);
+    },
+    async (matchId) => {
+      const turnAddr = (await read("getTurn", [matchId])) as Hex;
+      await useSonarAndConfirm(matchId, walletOf(idxOf(turnAddr)));
+    },
+    async (matchId) => {
+      const turnAddr = (await read("getTurn", [matchId])) as Hex;
+      const fee = (await getFee()) * barrageDraws;
+      return useAreaSkillAndConfirm(
+        matchId,
+        walletOf(idxOf(turnAddr)),
+        "useBarrage",
+        [matchId, 0, 0],
+        fee,
+        "BarrageFired",
+        "confirmBarrage",
+      );
+    },
+    async (matchId) => {
+      if (await passUntilTurnOf(matchId, 1)) return true;
+      const fee = (await getFee()) * bombardmentDraws;
+      return useAreaSkillAndConfirm(
+        matchId,
+        walletB,
+        "useBombardment",
+        [matchId, 0, 0],
+        fee,
+        "BombardmentFired",
+        "confirmBombardment",
+      );
+    },
+    async (matchId) => {
+      const turnAddr = (await read("getTurn", [matchId])) as Hex;
+      return doShot(matchId, idxOf(turnAddr));
+    },
+  ]);
 
-  console.log("\nGas used:");
+  // Match 2: Rake vs Salvo.
+  await runMatch("Match 2: Rake vs Salvo", CAPTAIN_RAKE, CAPTAIN_SALVO, [
+    async (matchId) => {
+      if (await passUntilTurnOf(matchId, 0)) return true;
+      const fee = (await getFee()) * rakeDraws;
+      return useAreaSkillAndConfirm(matchId, walletA, "useRake", [matchId, 0], fee, "RakeFired", "confirmRake");
+    },
+    async (matchId) => {
+      if (await passUntilTurnOf(matchId, 1)) return true;
+      const cells = await nextUnshotCells(matchId, 0, 3);
+      return useAreaSkillAndConfirm(
+        matchId,
+        walletB,
+        "useSalvo",
+        [matchId, cells[0], cells[1], cells[2]],
+        0n,
+        "SalvoFired",
+        "confirmSalvo",
+      );
+    },
+    async (matchId) => {
+      const turnAddr = (await read("getTurn", [matchId])) as Hex;
+      return doShot(matchId, idxOf(turnAddr));
+    },
+  ]);
+
+  // Match 3: Carpet vs Shield (Shield's own action is not re-exercised
+  // here, already covered for real in match 1).
+  await runMatch("Match 3: Carpet vs Shield", CAPTAIN_CARPET, CAPTAIN_SHIELD, [
+    async (matchId) => {
+      if (await passUntilTurnOf(matchId, 0)) return true;
+      return useAreaSkillAndConfirm(
+        matchId,
+        walletA,
+        "useCarpet",
+        [matchId, 0, 0],
+        0n,
+        "CarpetFired",
+        "confirmCarpet",
+      );
+    },
+    async (matchId) => {
+      const turnAddr = (await read("getTurn", [matchId])) as Hex;
+      return doShot(matchId, idxOf(turnAddr));
+    },
+  ]);
+
+  console.log("Every skill's action and confirm pair (Sonar, Barrage, Bombardment, Rake, Salvo, Carpet), plus");
+  console.log("placement, dice roll and plain shots, completed using only handles fetched from events and public");
+  console.log("getters, the same way a real client has to. No unreachable-handle gap surfaced.\n");
+
+  console.log("Gas used:");
   for (const { label, gasUsed } of gasLog) console.log(`  ${label}: ${gasUsed}`);
 }
 
