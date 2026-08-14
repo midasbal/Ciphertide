@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import SonarBackdrop from '../components/hero/SonarBackdrop'
 import Reveal from '../components/reveal/Reveal'
 import { getGameClient } from '../lib/gameClient'
+import { getSigner } from '../lib/signer'
 import type { CiphertideClient, MatchId } from '../game'
 import './Lobby.css'
 
@@ -65,6 +66,13 @@ export default function Lobby() {
   const [joinState, setJoinState] = useState<JoinState>({ status: 'idle' })
   const [copyLabel, setCopyLabel] = useState('Copy')
   const hostClientRef = useRef<CiphertideClient | null>(null)
+
+  // No play-wallet and no explicit dev override means there is nothing
+  // to sign with, send the player to enlist first rather than showing a
+  // lobby that can never actually create or join anything.
+  useEffect(() => {
+    if (!getSigner()) navigate('/register', { replace: true })
+  }, [navigate])
 
   useEffect(() => {
     if (hostState.status !== 'waiting') return
