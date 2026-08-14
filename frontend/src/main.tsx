@@ -27,11 +27,16 @@ const isLeaderboard = params.get('screen') === 'leaderboard'
 // contract wiring. Visit /?screen=profile to reach it.
 const isProfile = params.get('screen') === 'profile'
 
+// Matchmaking lobby: create or join a real match through the deployed
+// contract. Visit /?screen=lobby to reach it.
+const isLobby = params.get('screen') === 'lobby'
+
 const DevHarness = lazy(() => import('./dev/harness.tsx'))
 const MatchScreen = lazy(() => import('./screens/MatchScreen.tsx'))
 const AimingDemo = lazy(() => import('./App.tsx'))
 const Leaderboard = lazy(() => import('./screens/Leaderboard.tsx'))
 const Profile = lazy(() => import('./screens/Profile.tsx'))
+const Lobby = lazy(() => import('./screens/Lobby.tsx'))
 
 function Root() {
   if (isHarness) {
@@ -66,6 +71,13 @@ function Root() {
     return (
       <Suspense fallback={null}>
         <Profile />
+      </Suspense>
+    )
+  }
+  if (isLobby) {
+    return (
+      <Suspense fallback={null}>
+        <Lobby />
       </Suspense>
     )
   }

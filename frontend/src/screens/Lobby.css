@@ -1,0 +1,477 @@
+.lobby {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------------
+ * Nav
+ * --------------------------------------------------------------- */
+
+.lobby-nav {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 82rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6);
+}
+
+.lobby-nav-mark {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ct-space-2);
+  font-family: var(--ct-font-display);
+  font-weight: 600;
+  font-size: var(--ct-text-md);
+  letter-spacing: var(--ct-tracking-widest);
+  color: var(--ct-text-primary);
+  text-decoration: none;
+}
+
+.lobby-nav-glyph {
+  color: var(--ct-accent);
+  text-shadow: 0 0 14px var(--ct-accent-soft);
+}
+
+.lobby-nav-links {
+  display: flex;
+  gap: var(--ct-space-6);
+  font-size: var(--ct-text-xs);
+  letter-spacing: var(--ct-tracking-wider);
+  text-transform: uppercase;
+}
+
+.lobby-nav-links a {
+  color: var(--ct-text-secondary);
+  text-decoration: none;
+  transition: color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.lobby-nav-links a:hover {
+  color: var(--ct-accent-bright);
+}
+
+/* ---------------------------------------------------------------
+ * Main and the console frame
+ * --------------------------------------------------------------- */
+
+.lobby-main {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  max-width: 72rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6) var(--ct-space-8);
+}
+
+.lobby-console-frame {
+  position: relative;
+  background: var(--ct-bg-panel);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-lg);
+  box-shadow: var(--ct-shadow-panel);
+  overflow: hidden;
+}
+
+.lobby-corner {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--ct-border-strong);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.lobby-corner--tl {
+  top: -1px;
+  left: -1px;
+  border-right: none;
+  border-bottom: none;
+}
+
+.lobby-corner--tr {
+  top: -1px;
+  right: -1px;
+  border-left: none;
+  border-bottom: none;
+}
+
+.lobby-corner--bl {
+  bottom: -1px;
+  left: -1px;
+  border-right: none;
+  border-top: none;
+}
+
+.lobby-corner--br {
+  bottom: -1px;
+  right: -1px;
+  border-left: none;
+  border-top: none;
+}
+
+/* Reveal failsafe: if the intersection observer never fires, force every
+ * reveal on this page visible after a beat so the page can never be left
+ * blank. Harmless when JS already revealed it earlier. */
+.lobby .reveal {
+  animation: lobby-reveal-failsafe 0ms 900ms forwards;
+}
+
+@keyframes lobby-reveal-failsafe {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lobby .reveal {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Header band
+ * --------------------------------------------------------------- */
+
+.lobby-header {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--ct-border-faint);
+}
+
+.lobby-header-backdrop {
+  position: absolute;
+  inset: 0;
+  opacity: 0.28;
+  pointer-events: none;
+}
+
+.lobby-header-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-3);
+  padding: var(--ct-space-6);
+}
+
+.lobby-title {
+  font-size: clamp(1.75rem, 3.4vw, var(--ct-text-2xl));
+  line-height: var(--ct-leading-tight);
+}
+
+.lobby-sub {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-base);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  max-width: 34rem;
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------
+ * Host / Join paths
+ * --------------------------------------------------------------- */
+
+.lobby-paths {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+@media (max-width: 760px) {
+  .lobby-paths {
+    grid-template-columns: 1fr;
+  }
+}
+
+.lobby-path {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ct-space-3);
+  padding: var(--ct-space-6);
+  border-right: 1px solid var(--ct-border-faint);
+}
+
+.lobby-paths > .lobby-path:last-child {
+  border-right: none;
+}
+
+@media (max-width: 760px) {
+  .lobby-path {
+    border-right: none;
+    border-bottom: 1px solid var(--ct-border-faint);
+  }
+
+  .lobby-paths > .lobby-path:last-child {
+    border-bottom: none;
+  }
+}
+
+.lobby-path-title {
+  font-size: var(--ct-text-lg);
+}
+
+.lobby-path-copy {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-sm);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------
+ * Buttons
+ * --------------------------------------------------------------- */
+
+.lobby-btn {
+  appearance: none;
+  border-radius: var(--ct-radius-md);
+  font-family: var(--ct-font-mono);
+  font-size: var(--ct-text-sm);
+  letter-spacing: var(--ct-tracking-wide);
+  text-transform: uppercase;
+  padding: var(--ct-space-3) var(--ct-space-5);
+  cursor: pointer;
+  transition:
+    background var(--ct-duration-standard) var(--ct-ease-standard),
+    border-color var(--ct-duration-standard) var(--ct-ease-standard),
+    color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.lobby-btn:focus-visible {
+  outline: 2px solid var(--ct-border-live);
+  outline-offset: 2px;
+}
+
+.lobby-btn--primary {
+  border: 1px solid var(--ct-border-live);
+  background: var(--ct-accent);
+  color: var(--ct-text-on-accent);
+}
+
+.lobby-btn--primary:hover {
+  background: var(--ct-accent-bright);
+}
+
+.lobby-btn--ghost {
+  border: 1px solid var(--ct-border-faint);
+  background: transparent;
+  color: var(--ct-text-secondary);
+  padding: var(--ct-space-2) var(--ct-space-4);
+}
+
+.lobby-btn--ghost:hover {
+  border-color: var(--ct-border);
+  color: var(--ct-text-primary);
+}
+
+/* ---------------------------------------------------------------
+ * Pending / waiting states
+ * --------------------------------------------------------------- */
+
+.lobby-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-space-3);
+  color: var(--ct-text-secondary);
+  font-size: var(--ct-text-sm);
+}
+
+.lobby-pulse {
+  position: relative;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-shrink: 0;
+}
+
+.lobby-pulse svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.lobby-pulse circle,
+.lobby-pulse line {
+  fill: none;
+  stroke: var(--ct-color-structure-soft);
+  stroke-width: 1;
+}
+
+.lobby-pulse circle:first-child {
+  stroke: var(--ct-border-live);
+}
+
+.lobby-pulse-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: var(--ct-accent-bright);
+  box-shadow: 0 0 10px 2px var(--ct-accent-soft);
+  animation: lobby-pulse-beat var(--ct-duration-sonar-sweep) var(--ct-ease-sonar) infinite;
+}
+
+@keyframes lobby-pulse-beat {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lobby-pulse-dot {
+    animation: none;
+    opacity: 0.85;
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Host: waiting state and the join code readout
+ * --------------------------------------------------------------- */
+
+.lobby-waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ct-space-2);
+  width: 100%;
+}
+
+.lobby-code-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-space-3);
+  flex-wrap: wrap;
+}
+
+.lobby-code {
+  font-size: var(--ct-text-xl);
+  color: var(--ct-accent-bright);
+  text-shadow: 0 0 14px var(--ct-accent-soft);
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-md);
+  padding: var(--ct-space-2) var(--ct-space-4);
+  user-select: all;
+}
+
+.lobby-pending--waiting {
+  margin-top: var(--ct-space-2);
+}
+
+/* ---------------------------------------------------------------
+ * Join: the code field
+ * --------------------------------------------------------------- */
+
+.lobby-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-2);
+  width: 100%;
+  max-width: 18rem;
+}
+
+.lobby-input {
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-md);
+  color: var(--ct-text-primary);
+  font-size: var(--ct-text-lg);
+  padding: var(--ct-space-3) var(--ct-space-4);
+  outline: none;
+  transition: border-color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.lobby-input::placeholder {
+  color: var(--ct-text-ghost);
+}
+
+.lobby-input:focus {
+  border-color: var(--ct-border-live);
+}
+
+.lobby-input:disabled {
+  opacity: 0.6;
+}
+
+/* ---------------------------------------------------------------
+ * Errors, the one place ember shows up on this page
+ * --------------------------------------------------------------- */
+
+.lobby-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ct-space-3);
+  width: 100%;
+  padding: var(--ct-space-3) var(--ct-space-4);
+  background: var(--ct-hit-faint);
+  border: 1px solid var(--ct-hit-soft);
+  border-radius: var(--ct-radius-md);
+}
+
+.lobby-error p {
+  margin: 0;
+  font-size: var(--ct-text-sm);
+  color: var(--ct-hit-bright);
+}
+
+/* ---------------------------------------------------------------
+ * Responsive
+ * --------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .lobby-main {
+    padding: var(--ct-space-4) var(--ct-space-4) var(--ct-space-7);
+  }
+
+  .lobby-header-content {
+    padding: var(--ct-space-5) var(--ct-space-4);
+  }
+
+  .lobby-path {
+    padding: var(--ct-space-5) var(--ct-space-4);
+  }
+
+  .lobby-code {
+    font-size: var(--ct-text-lg);
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Footer
+ * --------------------------------------------------------------- */
+
+.lobby-footer {
+  position: relative;
+  z-index: 1;
+  max-width: 72rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ct-space-2);
+  border-top: 1px solid var(--ct-border-faint);
+  font-size: var(--ct-text-2xs);
+  color: var(--ct-text-ghost);
+  letter-spacing: var(--ct-tracking-wide);
+}

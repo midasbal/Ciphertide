@@ -209,6 +209,14 @@ export class CiphertideClient {
     return this.read<Address>('getPlayerAddress', [matchId, idx])
   }
 
+  // The next match id the contract will hand out. Since match ids are
+  // handed out sequentially starting at 1 (see createMatch), any id from
+  // 1 up to but excluding this value has been created at least once;
+  // anything else is a code that was never issued.
+  async getNextMatchId(): Promise<MatchId> {
+    return this.read<bigint>('nextMatchId')
+  }
+
   // Resolves which player index (0 or 1) this client's own account is in
   // the given match, needed for confirmPlacement and for reading the
   // right side's own board.

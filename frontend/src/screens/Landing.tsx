@@ -80,6 +80,7 @@ export default function Landing() {
           <a href="#how">Protocol</a>
           <a href="#captains">Captains</a>
           <a href="/?screen=profile">Profile</a>
+          <a href="/?screen=lobby">Play</a>
           <a href="/?screen=match">Console</a>
         </nav>
       </header>
@@ -99,7 +100,7 @@ export default function Landing() {
             shot forces a single cell to speak. Built on Base, sealed by Inco.
           </p>
           <div className="landing-hero-actions">
-            <a className="landing-cta landing-cta--primary" href="/?screen=match">
+            <a className="landing-cta landing-cta--primary" href="/?screen=lobby">
               Deploy Your Fleet
             </a>
             <a className="landing-cta landing-cta--ghost" href="#how">
@@ -193,7 +194,7 @@ export default function Landing() {
             <p className="landing-section-lede">
               Your waters are waiting. Nobody else can see them, not until you decide who gets to.
             </p>
-            <a className="landing-cta landing-cta--primary landing-cta--large" href="/?screen=match">
+            <a className="landing-cta landing-cta--primary landing-cta--large" href="/?screen=lobby">
               Deploy Your Fleet
             </a>
           </div>
