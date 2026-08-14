@@ -174,24 +174,14 @@ deployment (`npm run e2e`, needs its own `.env`, see
 
 | Contract | Address |
 | --- | --- |
-| Ciphertide | `0x37c76DFaFf2fFA918d0dDc62E7DE49Ac53aCD890` |
-| CiphertideMechanics | `0x16b350665D7FDB5850B54Cb14eedDa2E3f751218` |
+| Ciphertide | `0xbf4469258DD6ACb1f5F13E488f02Ea25D7958C44` |
+| CiphertideMechanics | `0x8d9146F7B947a6e6372416f354EfA7DA368c9BA0` |
 
 Chain: Base Sepolia (chain id 84532). This project targets Base Sepolia
 only, no mainnet deployment exists or is planned.
 
 ## Known limitations
 
-- **Bombardment and Carpet are temporarily disabled** in the frontend.
-  Both skills strike more cells in one call than Barrage does, and
-  scaling Barrage's own measured gas cost up by cell count puts both
-  past the RPC's per-transaction gas cap, where an out-of-gas revert is
-  the best case and an outright rejected transaction is the more likely
-  one. Placement hit the same wall and was already split into 7 smaller
-  steps instead of 1; Bombardment and Carpet need that same contract-side
-  stepped-call treatment, a separate, larger fix. The UI shows both as a
-  clearly unavailable skill entry rather than letting a player fire a
-  call that would just fail.
 - **The play-wallet sponsor funding and in-match chat backends are
   in-memory only.** Both work today because the Vite dev server is one
   long-lived Node process. Neither survives a serverless cold start or a
