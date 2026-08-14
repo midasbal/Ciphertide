@@ -54,7 +54,6 @@ export default function Leaderboard() {
               </svg>
               <span className="command-flourish-dot" />
             </div>
-            <p className="command-callsign">KESTREL</p>
             <p className="command-address ct-mono">0x83e2...17c9</p>
 
             {you && (
@@ -118,7 +117,7 @@ export default function Leaderboard() {
                     Rank
                   </span>
                   <span className="leaderboard-cell leaderboard-cell--callsign" role="columnheader">
-                    Callsign
+                    Address
                   </span>
                   <span className="leaderboard-cell leaderboard-cell--num" role="columnheader">
                     W
@@ -145,10 +144,9 @@ export default function Leaderboard() {
                     </span>
                     <span className="leaderboard-cell leaderboard-cell--callsign" role="cell">
                       <span className="leaderboard-callsign-row">
-                        <span className="leaderboard-callsign">{row.callsign}</span>
+                        <span className="leaderboard-address ct-mono">{row.address}</span>
                         {row.isYou && <span className="leaderboard-you-tag ct-label">You</span>}
                       </span>
-                      <span className="leaderboard-address ct-mono">{row.address}</span>
                     </span>
                     <span className="leaderboard-cell leaderboard-cell--num ct-mono" role="cell">
                       {row.wins}

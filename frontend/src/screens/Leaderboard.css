@@ -214,7 +214,7 @@
   }
 }
 
-.command-callsign {
+.command-address {
   font-family: var(--ct-font-display);
   font-weight: 600;
   font-size: var(--ct-text-lg);
@@ -222,12 +222,6 @@
   color: var(--ct-text-primary);
   text-align: center;
   margin: 0;
-}
-
-.command-address {
-  font-size: var(--ct-text-2xs);
-  color: var(--ct-text-tertiary);
-  text-align: center;
 }
 
 .command-stats {
@@ -440,14 +434,6 @@
   gap: var(--ct-space-2);
 }
 
-.leaderboard-callsign {
-  font-family: var(--ct-font-display);
-  font-weight: 600;
-  font-size: var(--ct-text-sm);
-  letter-spacing: var(--ct-tracking-wide);
-  color: var(--ct-text-primary);
-}
-
 .leaderboard-you-tag {
   color: var(--ct-color-glow-bright);
   border: 1px solid var(--ct-border-live);
@@ -457,8 +443,8 @@
 }
 
 .leaderboard-address {
-  font-size: var(--ct-text-2xs);
-  color: var(--ct-text-tertiary);
+  font-size: var(--ct-text-sm);
+  color: var(--ct-text-primary);
 }
 
 .leaderboard-cell--num {
