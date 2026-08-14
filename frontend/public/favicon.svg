@@ -1,0 +1,7 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Ciphertide">
+  <rect width="64" height="64" rx="14" fill="#05070d" />
+  <rect x="29" y="10" width="6" height="36" rx="1" fill="#6f9bff" />
+  <polygon points="26,46 38,46 32,58" fill="#6f9bff" />
+  <rect x="15" y="17" width="34" height="6" rx="1" fill="#6f9bff" />
+  <rect x="19" y="29" width="26" height="6" rx="1" fill="#6f9bff" />
+</svg>
