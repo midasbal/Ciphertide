@@ -110,8 +110,35 @@ function findEvent(receipt: TransactionReceipt, eventName: string) {
   throw new Error(`event ${eventName} not found in receipt ${receipt.transactionHash}`);
 }
 
-const gasLog: Array<{ label: string; gasUsed: bigint }> = [];
+// Per-transaction gas record, extended with the player whose wallet sent
+// it and a coarse category, so gas can be tallied per player and per
+// move type afterward (see printPerPlayerGasSummary). player and
+// category are filled in by write() itself, inferred from which wallet
+// was used and from functionName, so no call site elsewhere in this
+// file needs to change.
+const gasLog: Array<{
+  label: string;
+  gasUsed: bigint;
+  effectiveGasPrice: bigint;
+  player: "A" | "B";
+  category: string;
+}> = [];
 const moveLog: Array<{ label: string; ms: number }> = [];
+
+// Buckets every contract call by what it is, purely from its function
+// name, so write() can tag each gas record without every call site
+// needing to say what kind of move it is. "confirm" is its own bucket
+// (rather than folded into placement/shot/skill) so the summary can show
+// action gas and confirm gas as two distinct, comparable totals.
+function categoryFor(functionName: string): string {
+  if (functionName === "createMatch" || functionName === "joinMatch") return "createOrJoin";
+  if (functionName === "placeMyBoardStep") return "placement";
+  if (functionName === "rollDice") return "diceRoll";
+  if (functionName === "shoot") return "shot";
+  if (functionName.startsWith("confirm")) return "confirm";
+  if (functionName.startsWith("use")) return `skill:${functionName.slice(3)}`;
+  return "other";
+}
 
 // Measures real wall clock time from the start of one full move (an
 // action's write, its attestation fetch, and its confirm's write) to the
@@ -224,7 +251,14 @@ async function main() {
       ...(gas ? { gas } : {}),
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    gasLog.push({ label: functionName, gasUsed: receipt.gasUsed });
+    const player = wallet.account.address.toLowerCase() === accountA.address.toLowerCase() ? "A" : "B";
+    gasLog.push({
+      label: functionName,
+      gasUsed: receipt.gasUsed,
+      effectiveGasPrice: receipt.effectiveGasPrice,
+      player,
+      category: categoryFor(functionName),
+    });
     // A read right after a mined write can land on a different, load
     // balanced backend node that has not caught up yet. A short pause
     // here is cheap next to the several seconds a Base Sepolia
@@ -594,6 +628,62 @@ async function main() {
   console.log("\nTrue reveal-ready time, tight polled every 1.5s (one real attempt per poll), action tx");
   console.log("mined to first genuine attestedReveal success, no fixed pause included:");
   for (const { label, ms } of readyLog) console.log(`  ${label}: ${(ms / 1000).toFixed(1)}s`);
+
+  await printPerPlayerGasSummary(publicClient);
+}
+
+// wei -> ETH, printed to 9 decimals, enough precision for testnet-sized
+// amounts (a few hundredths of a cent) to stay legible rather than
+// rounding to 0.000000.
+function formatEth(wei: bigint): string {
+  return (Number(wei) / 1e18).toFixed(9);
+}
+
+// Totals every gas record per player and per category, including that
+// player's own confirms (the conservative case: the play-wallet pays for
+// everything it does, both the action and its confirm). This is the
+// number that matters for sizing how much a sponsor must fund each
+// play-wallet, the categories underneath it are for understanding what
+// that total is made of.
+async function printPerPlayerGasSummary(publicClient: { getGasPrice: () => Promise<bigint> }) {
+  console.log("\nPer-player gas accounting (includes that player's own confirms):");
+  for (const player of ["A", "B"] as const) {
+    const entries = gasLog.filter((e) => e.player === player);
+    const sumOf = (category: string) => entries.filter((e) => e.category === category).reduce((s, e) => s + e.gasUsed, 0n);
+    const countOf = (category: string) => entries.filter((e) => e.category === category).length;
+
+    const totalGas = entries.reduce((sum, e) => sum + e.gasUsed, 0n);
+    const totalWei = entries.reduce((sum, e) => sum + e.gasUsed * e.effectiveGasPrice, 0n);
+    const avgGasPrice = entries.length > 0 ? totalWei / totalGas : 0n;
+
+    console.log(`\nPlayer ${player} (${entries.length} transactions):`);
+    console.log(`  total gas used: ${totalGas}`);
+    console.log(`  total spent: ${formatEth(totalWei)} ETH (${totalWei} wei)`);
+    console.log(`  average effective gas price: ${avgGasPrice} wei (${(Number(avgGasPrice) / 1e9).toFixed(4)} gwei)`);
+
+    console.log(`  createOrJoin: ${sumOf("createOrJoin")} gas (${countOf("createOrJoin")} tx)`);
+    console.log(`  placement (all steps): ${sumOf("placement")} gas (${countOf("placement")} tx)`);
+    console.log(`  diceRoll: ${sumOf("diceRoll")} gas (${countOf("diceRoll")} tx)`);
+
+    const shotCount = countOf("shot");
+    const shotTotal = sumOf("shot");
+    const avgPerShot = shotCount > 0 ? Math.round(Number(shotTotal) / shotCount) : 0;
+    console.log(`  shots: ${shotCount} shot(s), ${shotTotal} gas total, ${avgPerShot} gas average per shot`);
+
+    const skillCategories = [...new Set(entries.map((e) => e.category).filter((c) => c.startsWith("skill:")))];
+    if (skillCategories.length === 0) {
+      console.log("  skills used: none");
+    } else {
+      for (const cat of skillCategories) {
+        console.log(`  ${cat.slice(6)}: ${sumOf(cat)} gas (${countOf(cat)} tx)`);
+      }
+    }
+
+    console.log(`  confirms: ${sumOf("confirm")} gas (${countOf("confirm")} tx)`);
+  }
+
+  const currentGasPrice = await publicClient.getGasPrice();
+  console.log(`\nCurrent Base Sepolia gas price at report time: ${currentGasPrice} wei (${(Number(currentGasPrice) / 1e9).toFixed(4)} gwei)`);
 }
 
 main().catch((err) => {
