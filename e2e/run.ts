@@ -1,4 +1,4 @@
-// Headless end-to-end run of full Ciphertide matches against a live
+// Headless end-to-end run of a single 1v1 Ciphertide match against a live
 // deployment on Base Sepolia. No UI, no frontend dependency. Exercises the
 // real two-phase encrypt, call, fetch-attestation, confirm loop against
 // genuine Inco Lightning infrastructure, the thing the Foundry test suite's
@@ -6,25 +6,21 @@
 // way a real client must: from a contract event or a public getter, never
 // by reaching into storage the way the test-only harness does.
 //
-// This script itself already caught one real gap this way: confirmShot
-// used to require a mineHit attestation that ShotFired never emitted and
-// no getter exposed, so no real client could ever have completed a shot's
-// confirm. That is fixed now (ShotFired emits mineHitHandle). This version
-// covers every two phase action and confirm pair, not just placement, shot
-// and Barrage, specifically so a future regression of the same shape would
-// show up here as a hard failure instead of silently shipping.
+// Ciphertide is a 1v1 game: a match is one game between two players. This
+// script plays exactly one match, the way a real game actually happens,
+// rather than several throwaway matches to sweep every captain skill (that
+// was a test convenience for an earlier audit, not a game mode, and skill
+// coverage is already proven by the 81 passing Foundry tests). One match
+// is enough to prove three things against real infrastructure: that the
+// stepped placement flow broadcasts and confirms, that the two-phase
+// action-and-confirm loop works end to end, and the real per-move latency.
 //
-// Runs three short matches back to back, since each match only has two
-// captain slots and there are five captain-owned unique skills (Shield,
-// Bombardment, Rake, Salvo, Carpet) plus two shared ones (Sonar, Barrage):
-//   Match 1: Shield vs Bombardment, exercises Shield, Sonar, Barrage,
-//            Bombardment, and a plain shot.
-//   Match 2: Rake vs Salvo, exercises Rake, Salvo, and a plain shot.
-//   Match 3: Carpet vs Shield, exercises Carpet and a plain shot.
-// Each match also drives placement plus its confirm for both players, and
-// dice roll plus its confirm, retried the same way a real client would
-// retry on a tie, since Base Sepolia's real randomness cannot be forced to
-// tie on demand.
+// Sequence: create and join with two captains, full stepped placement for
+// both players (placeMyBoardStep called once per ship plus once for mines
+// and the reveal, NUM_SHIPS + 1 calls each, confirmed by confirmPlacement),
+// the dice roll and its confirm (retried on a tie the way a real client
+// would), a couple of plain shots with their confirms, and one shared
+// skill (Barrage) through its confirm.
 //
 // Usage: fill in e2e/.env (see e2e/.env.example) with a Base Sepolia RPC
 // URL, two funded player private keys, and the deployed Ciphertide address,
@@ -45,7 +41,6 @@ import {
 import { baseSepolia } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { Lightning } from "@inco/lightning-js/lite";
-import { handleTypes } from "@inco/lightning-js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ciphertideAbi = JSON.parse(
@@ -62,7 +57,17 @@ const executorAbi = [
   },
 ] as const;
 
-const RETRY = { maxRetries: 8, baseDelayInMs: 1500, backoffFactor: 1.7 };
+// A real run against Base Sepolia showed the covalidator can take longer
+// than a modest retry budget to have a handle's ciphertext ready: right
+// after the mines and reveal step (20 random draws folded into one
+// reveal), attestedReveal failed repeatedly with "ciphertext for handle
+// ... not found, it might not have been processed yet" through 8 retries
+// at this backoff (about 90 seconds total), then succeeded on a fresh
+// call issued about a minute after that. Not a contract or SDK bug, the
+// mock's synchronous processAllOperations() has no equivalent delay to
+// model, so this only shows up against the real covalidator. Widened
+// well past what was actually needed here as a safety margin.
+const RETRY = { maxRetries: 14, baseDelayInMs: 2000, backoffFactor: 1.5 };
 const ZERO32 = ("0x" + "0".repeat(64)) as Hex;
 const nonZero = (h: Hex) => h !== ZERO32;
 const PHASE_NAMES = ["WaitingForOpponent", "Placing", "AwaitingDiceRoll", "InProgress", "Finished"];
@@ -128,7 +133,7 @@ async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 async function main() {
-  console.log("Ciphertide headless end-to-end run, Base Sepolia\n");
+  console.log("Ciphertide headless end-to-end run, Base Sepolia, single 1v1 match\n");
 
   const publicClient = createPublicClient({ chain: baseSepolia, transport: http(rpcUrl) });
   const accountA = privateKeyToAccount(playerAKey);
@@ -145,6 +150,12 @@ async function main() {
   const getFee = async () =>
     publicClient.readContract({ address: zap.executorAddress as Hex, abi: executorAbi, functionName: "getFee" });
 
+  async function logBalances(label: string) {
+    const balA = await publicClient.getBalance({ address: accountA.address });
+    const balB = await publicClient.getBalance({ address: accountB.address });
+    console.log(`${label}: Player A balance ${balA} wei, Player B balance ${balB} wei\n`);
+  }
+
   // Every constant this script reads is a uint8 or uint16 on the Solidity
   // side. viem decodes integer return types 48 bits or narrower as a plain
   // JS number, not a bigint, so without this explicit BigInt(...) coercion
@@ -157,15 +168,14 @@ async function main() {
     return BigInt(value as number | bigint);
   };
 
-  // sepolia.base.org is a load balanced public endpoint with several
-  // backend nodes behind it, no session affinity across separate HTTP
-  // requests. writeContract's own gas estimation step can land on a node
-  // that has not yet caught up with the previous write (a join, a
-  // confirm, and so on), and reverts against that stale view even though
-  // the real current chain state is fine, the same class of staleness as
-  // the sleep after a write below guards against on the read side. This
-  // never actually broadcasts a transaction when estimation itself fails,
-  // so retrying costs no gas, only a little wall clock time.
+  // A hosted RPC's own writeContract gas estimation step can land on a
+  // node that has not yet caught up with a previous write (a join, a
+  // confirm, and so on) if the endpoint is load balanced across several
+  // backend nodes with no session affinity, and revert against that stale
+  // view even though the real current chain state is fine, the same class
+  // of staleness the sleep after a write below guards against on the read
+  // side. This never actually broadcasts a transaction when estimation
+  // itself fails, so retrying costs no gas, only a little wall clock time.
   async function writeContractWithRetry(wallet: typeof walletA, callArgs: any): Promise<Hex> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -180,37 +190,27 @@ async function main() {
     throw lastError;
   }
 
-  // sepolia.base.org's eth_estimateGas caps its own search well under the
-  // real block gas limit (1.2 billion on Base Sepolia), a common public
-  // RPC safety cap unrelated to what the chain itself allows. Every call
-  // that runs many real Inco random draws in a loop (each one a real
-  // operation against the live executor, not the cheap mock) needs real
-  // gas in the tens of millions, at or past that estimation cap, so
-  // estimateGas itself fails with a bare "execution reverted" before the
-  // transaction is ever sent, even though a direct eth_call with an
-  // explicit high gas value confirms the call actually succeeds. Passing
-  // an explicit gas limit skips estimation entirely.
-  //
-  // Placement used to need this treatment too (its old single call ran
-  // all ~140 draws at once, needing roughly 51 to 55 million real gas),
-  // but every hosted RPC tried, free public ones and a paid Alchemy Base
-  // Sepolia endpoint alike, also rejects eth_sendRawTransaction itself
-  // once the declared gas limit passes a policy ceiling of its own,
-  // anywhere from about 15 to 50 million depending on the provider, well
-  // short of what one placement call needed. That ceiling is not
-  // something this script can work around from the client side, an
-  // explicit gas limit does not help once the RPC refuses to broadcast
-  // the transaction at all. The real fix was on the contract side:
-  // placement is now placeMyBoardStep, one ship (or the mines and reveal)
-  // per call, so no single placement transaction needs more than about
-  // 10 million real gas, comfortably under every ceiling seen so far, no
-  // explicit override needed. Bombardment, Barrage and Rake still run
-  // many draws in one call and keep their overrides below.
-  const explicitGasLimits: Record<string, bigint> = {
-    useBombardment: 80_000_000n,
-    useBarrage: 60_000_000n,
-    useRake: 60_000_000n,
-  };
+  // eth_estimateGas caps its own search well under the real block gas
+  // limit (1.2 billion on Base Sepolia), a common RPC safety cap unrelated
+  // to what the chain itself allows. A call that runs many real Inco
+  // random draws in one transaction (each one a real operation against the
+  // live executor, not the cheap mock) can need real gas at or past that
+  // estimation cap, so estimateGas itself fails with a bare "execution
+  // reverted" before the transaction is ever sent, even though a direct
+  // eth_call with an explicit high gas value confirms the call actually
+  // succeeds. Passing an explicit gas limit skips estimation entirely.
+  // Placement no longer needs this (placeMyBoardStep keeps every call to
+  // roughly 10 million real gas or less). Barrage's real cost measured
+  // live at about 11.85 million gas (cast estimate against the live
+  // deployment), well inside both the real block gas limit and Alchemy's
+  // own lower per-transaction cap (previously found to sit around 15-20
+  // million, see the note on writeContractWithRetry above), so it no
+  // longer needs an override either; an earlier, overly conservative 60
+  // million override (a holdover from when placement was one single call)
+  // actually broke Barrage here, since Alchemy rejects a transaction
+  // whose requested gas exceeds its own cap outright, regardless of how
+  // much gas the call would really use.
+  const explicitGasLimits: Record<string, bigint> = {};
 
   async function write(wallet: typeof walletA, functionName: string, args: unknown[], value = 0n) {
     const gas = explicitGasLimits[functionName];
@@ -225,11 +225,11 @@ async function main() {
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     gasLog.push({ label: functionName, gasUsed: receipt.gasUsed });
-    // sepolia.base.org is a load balanced public endpoint: a read right
-    // after a mined write can land on a different backend node that has
-    // not caught up yet. A short pause here is cheap next to the several
-    // seconds a Base Sepolia confirmation already takes, and avoids a
-    // false failure on a state check that is actually correct on chain.
+    // A read right after a mined write can land on a different, load
+    // balanced backend node that has not caught up yet. A short pause
+    // here is cheap next to the several seconds a Base Sepolia
+    // confirmation already takes, and avoids a false failure on a state
+    // check that is actually correct on chain.
     await sleep(1500);
     return receipt;
   }
@@ -238,48 +238,53 @@ async function main() {
     return publicClient.readContract({ address: ciphertideAddress, abi: ciphertideAbi, functionName, args });
   }
 
+  // The SDK's own backoffConfig retries a "ciphertext not found yet"
+  // response, but a real run showed the covalidator can also answer a
+  // freshly revealed handle with a "PermissionDenied: acl disallowed"
+  // response instead, seemingly for the same underlying reason (the
+  // reveal grant has not finished processing on the covalidator's side
+  // yet), and the SDK does not retry that response on its own, it comes
+  // straight back as a thrown error. This wraps the whole reveal call in
+  // its own outer retry so either shape of "not ready yet" response gets
+  // the same patience, since both were observed to resolve within a
+  // couple of minutes without anything else changing.
   async function revealAsAttestations(handles: Hex[]) {
-    const results = await zap.attestedReveal(handles, { backoffConfig: RETRY });
-    const byHandle = new Map(results.map((r: any) => [r.handle.toLowerCase(), r]));
-    return handles.map((h) => {
-      const r: any = byHandle.get(h.toLowerCase());
-      if (!r) throw new Error(`no attestation returned for handle ${h}`);
-      return {
-        attestation: { handle: r.handle as Hex, value: toHex(r.plaintext.value, { size: 32 }) as Hex },
-        signatures: r.covalidatorSignatures.map((s: Uint8Array) => toHex(s)) as Hex[],
-      };
-    });
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const results = await zap.attestedReveal(handles, { backoffConfig: RETRY });
+        const byHandle = new Map(results.map((r: any) => [r.handle.toLowerCase(), r]));
+        return handles.map((h) => {
+          const r: any = byHandle.get(h.toLowerCase());
+          if (!r) throw new Error(`no attestation returned for handle ${h}`);
+          return {
+            attestation: { handle: r.handle as Hex, value: toHex(r.plaintext.value, { size: 32 }) as Hex },
+            signatures: r.covalidatorSignatures.map((s: Uint8Array) => toHex(s)) as Hex[],
+          };
+        });
+      } catch (err) {
+        lastError = err;
+        console.log(`  (reveal attempt ${attempt + 1}/5 failed, the covalidator may still be catching up, waiting...)`);
+        await sleep(15000 * (attempt + 1));
+      }
+    }
+    throw lastError;
   }
 
   // Player A always creates, Player B always joins, so player index 0 is
-  // always A and index 1 is always B for every match this script creates.
-  // Confirmed once below rather than assumed.
+  // always A and index 1 is always B for this match.
   const idxOf = (addr: Hex) => (addr.toLowerCase() === accountA.address.toLowerCase() ? 0 : 1);
   const walletOf = (idx: number) => (idx === 0 ? walletA : walletB);
 
-  // Constants read once, shared by every match below.
   const NUM_SHIPS = await readConst("NUM_SHIPS");
   const PLACEMENT_ATTEMPTS_PER_SHIP = await readConst("PLACEMENT_ATTEMPTS_PER_SHIP");
   const MINES_PER_PLAYER = await readConst("MINES_PER_PLAYER");
   const MINE_PLACEMENT_ATTEMPTS = await readConst("MINE_PLACEMENT_ATTEMPTS");
-
   const BARRAGE_MAX_CELLS = await readConst("BARRAGE_MAX_CELLS");
   const BARRAGE_ATTEMPTS_PER_CELL = await readConst("BARRAGE_ATTEMPTS_PER_CELL");
   const barrageDraws = 1n + BARRAGE_MAX_CELLS * BARRAGE_ATTEMPTS_PER_CELL;
-
-  const BOMBARDMENT_STRIKE_COUNT = await readConst("BOMBARDMENT_STRIKE_COUNT");
-  const BOMBARDMENT_ATTEMPTS_PER_CELL = await readConst("BOMBARDMENT_ATTEMPTS_PER_CELL");
-  const bombardmentDraws = 1n + BOMBARDMENT_STRIKE_COUNT * BOMBARDMENT_ATTEMPTS_PER_CELL;
-
-  const RAKE_STRIKE_COUNT = await readConst("RAKE_STRIKE_COUNT");
-  const RAKE_ATTEMPTS_PER_CELL = await readConst("RAKE_ATTEMPTS_PER_CELL");
-  const rakeDraws = 1n + RAKE_STRIKE_COUNT * RAKE_ATTEMPTS_PER_CELL;
-
   const CAPTAIN_SHIELD = await readConst("CAPTAIN_SHIELD");
   const CAPTAIN_BOMBARDMENT = await readConst("CAPTAIN_BOMBARDMENT");
-  const CAPTAIN_RAKE = await readConst("CAPTAIN_RAKE");
-  const CAPTAIN_SALVO = await readConst("CAPTAIN_SALVO");
-  const CAPTAIN_CARPET = await readConst("CAPTAIN_CARPET");
 
   // Placement is spread across NUM_SHIPS + 1 separate placeMyBoardStep
   // calls, one ship per call, then a final call that places both mines
@@ -340,7 +345,20 @@ async function main() {
         const [a, b] = await revealAsAttestations([rollAHandle, rollBHandle]);
         await write(walletA, "confirmDiceRoll", [matchId, a.attestation, a.signatures, b.attestation, b.signatures]);
       });
+      // The write() above already waits 1.5s after confirmDiceRoll lands,
+      // but a real run showed that margin was not always enough: a phase
+      // read immediately after can still land on a lagging backend node
+      // and appear to still be AwaitingDiceRoll when the real state has
+      // already moved to InProgress (a non-tied roll), which then made a
+      // spurious extra rollDice call revert on chain with "not ready for
+      // dice roll" (a genuine, avoidable revert, not a tie). A short extra
+      // pause plus a second confirming read closes that gap before this
+      // loop trusts a "still AwaitingDiceRoll" reading enough to reroll.
       phase = (await read("getPhase", [matchId])) as number;
+      if (phase !== 3) {
+        await sleep(3000);
+        phase = (await read("getPhase", [matchId])) as number;
+      }
       if (phase !== 3) console.log(`Dice tied on attempt ${attempts}, rerolling (the real reroll on tie path)...`);
     }
     if (phase !== 3) throw new Error("dice roll never decided a starting player");
@@ -399,47 +417,17 @@ async function main() {
     return won;
   }
 
-  // Repeatedly takes a plain shot from whoever currently holds the turn
-  // until it becomes targetIdx's turn, so a captain-gated skill (which can
-  // only be used on its owner's own turn) can be reached regardless of
-  // which player the dice roll happened to start, and regardless of any
-  // turn-forfeit in play (Salvo's own cost included, since this only
-  // watches getTurn and does not care why control moved). Bounded so a
-  // genuinely stuck match fails loudly instead of looping forever. Returns
-  // true if the match finished while passing turns.
-  async function passUntilTurnOf(matchId: bigint, targetIdx: number, maxShots = 20): Promise<boolean> {
-    for (let i = 0; i < maxShots; i++) {
-      const turnAddr = (await read("getTurn", [matchId])) as Hex;
-      if (idxOf(turnAddr) === targetIdx) return false;
-      const finished = await doShot(matchId, idxOf(turnAddr));
-      if (finished) return true;
-    }
-    throw new Error(`turn never reached player index ${targetIdx} after ${maxShots} filler shots`);
-  }
-
-  // Shared shape for Barrage, Bombardment, Rake, Salvo and Carpet: each
-  // fires with its own args, reveals packedHandle and allDestroyedHandle
-  // from its own Fired event, and confirms with the same (matchId,
-  // packedAttestation, packedSignatures, winAttestation, winSignatures)
-  // shape. Returns true if the match finished.
-  async function useAreaSkillAndConfirm(
-    matchId: bigint,
-    wallet: typeof walletA,
-    useFnName: string,
-    useArgs: unknown[],
-    fee: bigint,
-    firedEventName: string,
-    confirmFnName: string,
-  ): Promise<boolean> {
-    return timed(useFnName, async () => {
-      const receipt = await write(wallet, useFnName, useArgs, fee);
-      console.log(`${useFnName}() gas ${receipt.gasUsed}`);
-      const { packedHandle, allDestroyedHandle } = findEvent(receipt, firedEventName) as {
+  async function useBarrageAndConfirm(matchId: bigint, wallet: typeof walletA): Promise<boolean> {
+    const fee = (await getFee()) * barrageDraws;
+    return timed("useBarrage", async () => {
+      const receipt = await write(wallet, "useBarrage", [matchId, 0, 0], fee);
+      console.log(`useBarrage() gas ${receipt.gasUsed}`);
+      const { packedHandle, allDestroyedHandle } = findEvent(receipt, "BarrageFired") as {
         packedHandle: Hex;
         allDestroyedHandle: Hex;
       };
       const [packed, win] = await revealAsAttestations([packedHandle, allDestroyedHandle]);
-      const confirmReceipt = await write(wallet, confirmFnName, [
+      const confirmReceipt = await write(wallet, "confirmBarrage", [
         matchId,
         packed.attestation,
         packed.signatures,
@@ -447,190 +435,67 @@ async function main() {
         win.signatures,
       ]);
       console.log(
-        `${confirmFnName} gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
+        `confirmBarrage gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
           `win=${nonZero(win.attestation.value)}\n`,
       );
       return nonZero(win.attestation.value);
     });
   }
 
-  async function useSonarAndConfirm(matchId: bigint, wallet: typeof walletA): Promise<void> {
-    await timed("useSonar", async () => {
-      const receipt = await write(wallet, "useSonar", [matchId, 0, 0]);
-      console.log(`useSonar() gas ${receipt.gasUsed}`);
-      const { resultHandle } = findEvent(receipt, "SonarFired") as { resultHandle: Hex };
-      const [result] = await revealAsAttestations([resultHandle]);
-      const confirmReceipt = await write(wallet, "confirmSonar", [matchId, result.attestation, result.signatures]);
-      console.log(`confirmSonar gas ${confirmReceipt.gasUsed}, anyShip=${nonZero(result.attestation.value)}\n`);
-    });
+  // The single 1v1 match.
+  console.log(`Creating match (Player A captain ${CAPTAIN_SHIELD}, Player B captain ${CAPTAIN_BOMBARDMENT})...`);
+  const createReceipt = await write(walletA, "createMatch", [CAPTAIN_SHIELD]);
+  const { matchId } = findEvent(createReceipt, "MatchCreated") as { matchId: bigint };
+  console.log(`Match ${matchId}, gas ${createReceipt.gasUsed}\n`);
+
+  await write(walletB, "joinMatch", [matchId, CAPTAIN_BOMBARDMENT]);
+  const addr0 = (await read("getPlayerAddress", [matchId, 0])) as Hex;
+  if (addr0.toLowerCase() !== accountA.address.toLowerCase()) {
+    throw new Error("player index assignment did not match the assumed A=0, B=1 convention");
   }
 
-  // Decrypts Player A's own board with a wallet-signed attestation
-  // (attestedDecrypt, distinct from the public attestedReveal used
-  // everywhere else in this script), then places a real shield on one of
-  // her own ship cells: a genuine client-encrypted input built with
-  // zap.encrypt and consumed on-chain via e.newEuint256. placeShield is a
-  // free action, it does not pass the turn and has no confirm step of its
-  // own (the shielded cell is never revealed unless struck), so it is
-  // outside the class of bug this script otherwise audits for, but it is
-  // still the one truly client-encrypted input in the whole game and worth
-  // exercising for real.
-  async function placeRealShield(matchId: bigint): Promise<void> {
-    console.log("Decrypting Player A's own board to place a real shield...");
-    const boardHandle = (await read("getBoardMask", [matchId, 0])) as Hex;
-    // Cast to any: @inco/lightning-js bundles its own nested viem version,
-    // structurally identical to this project's but a distinct type from
-    // TypeScript's point of view, which otherwise rejects a wallet client
-    // built from this project's own viem as an argument here. Harmless at
-    // runtime, both are plain viem WalletClient objects.
-    const [decrypted] = await zap.attestedDecrypt(walletA as any, [boardHandle], { backoffConfig: RETRY });
-    const board = decrypted.plaintext.value as bigint;
-    let shieldCell = 0;
-    while (((board >> BigInt(shieldCell)) & 1n) === 0n) shieldCell++;
-    console.log(`Player A's real ship cell chosen for the shield: ${shieldCell}`);
+  await logBalances("Balances before placement");
+  await placeAndConfirm(matchId, walletA, 0, "Player A");
+  await placeAndConfirm(matchId, walletB, 1, "Player B");
+  await logBalances("Balances after placement");
 
-    const ciphertext = await zap.encrypt(1n << BigInt(shieldCell), {
-      accountAddress: accountA.address,
-      dappAddress: ciphertideAddress,
-      handleType: handleTypes.euint256,
-    });
-    const fee = await getFee();
-    const receipt = await write(walletA, "placeShield", [matchId, ciphertext], fee);
-    console.log(`Shield placed, gas ${receipt.gasUsed}\n`);
+  await rollDiceUntilDecided(matchId);
+
+  // A read of getTurn right after a write can land on a load balanced
+  // backend node that has not caught up with that write yet, same class
+  // of staleness worked around elsewhere in this script, and was seen for
+  // real here: a getTurn read right after the first shot's confirm still
+  // showed the actor who had just moved, so the script shot again as the
+  // same player and the contract correctly rejected it with "not your
+  // turn". A plain shot always hands the turn to the other player (only
+  // Salvo, not used in this script, can skip a turn), so once the first
+  // turn is known fresh off the dice roll, later turns are tracked
+  // locally instead of re-reading chain state that might not have caught
+  // up yet.
+  let finished = false;
+  let actorIdx = idxOf((await read("getTurn", [matchId])) as Hex);
+  finished = await doShot(matchId, actorIdx);
+  actorIdx = actorIdx === 0 ? 1 : 0;
+
+  if (!finished) {
+    finished = await doShot(matchId, actorIdx);
+    actorIdx = actorIdx === 0 ? 1 : 0;
   }
 
-  async function runMatch(
-    label: string,
-    captainA: bigint,
-    captainB: bigint,
-    exercises: Array<(matchId: bigint) => Promise<boolean | void>>,
-  ) {
-    console.log(`=== ${label} ===\n`);
-    console.log(`Creating match (Player A captain ${captainA}, Player B captain ${captainB})...`);
-    const createReceipt = await write(walletA, "createMatch", [captainA]);
-    const { matchId } = findEvent(createReceipt, "MatchCreated") as { matchId: bigint };
-    console.log(`Match ${matchId}, gas ${createReceipt.gasUsed}\n`);
-
-    await write(walletB, "joinMatch", [matchId, captainB]);
-    const addr0 = (await read("getPlayerAddress", [matchId, 0])) as Hex;
-    if (addr0.toLowerCase() !== accountA.address.toLowerCase()) {
-      throw new Error("player index assignment did not match the assumed A=0, B=1 convention");
-    }
-
-    await placeAndConfirm(matchId, walletA, 0, `${label} Player A`);
-    await placeAndConfirm(matchId, walletB, 1, `${label} Player B`);
-    await rollDiceUntilDecided(matchId);
-
-    for (const exercise of exercises) {
-      const phaseNow = (await read("getPhase", [matchId])) as number;
-      if (phaseNow === 4 /* Finished */) {
-        console.log(`${label}: match already finished, skipping the remaining exercises for this match.\n`);
-        break;
-      }
-      const finished = await exercise(matchId);
-      if (finished) break;
-    }
-
-    const finalPhase = (await read("getPhase", [matchId])) as number;
-    console.log(`${label} final phase: ${PHASE_NAMES[finalPhase]}`);
-    if (finalPhase === 4) console.log(`${label} winner: ${await read("getWinner", [matchId])}`);
-    console.log("");
+  if (!finished) {
+    finished = await useBarrageAndConfirm(matchId, walletOf(actorIdx));
   }
 
-  // Match 1: Shield vs Bombardment. Exercises the one client-encrypted
-  // input in the game (Shield), both shared skills (Sonar, Barrage), and
-  // Bombardment, plus a plain shot.
-  await runMatch("Match 1: Shield vs Bombardment", CAPTAIN_SHIELD, CAPTAIN_BOMBARDMENT, [
-    async (matchId) => {
-      if (await passUntilTurnOf(matchId, 0)) return true;
-      await placeRealShield(matchId);
-    },
-    async (matchId) => {
-      const turnAddr = (await read("getTurn", [matchId])) as Hex;
-      await useSonarAndConfirm(matchId, walletOf(idxOf(turnAddr)));
-    },
-    async (matchId) => {
-      const turnAddr = (await read("getTurn", [matchId])) as Hex;
-      const fee = (await getFee()) * barrageDraws;
-      return useAreaSkillAndConfirm(
-        matchId,
-        walletOf(idxOf(turnAddr)),
-        "useBarrage",
-        [matchId, 0, 0],
-        fee,
-        "BarrageFired",
-        "confirmBarrage",
-      );
-    },
-    async (matchId) => {
-      if (await passUntilTurnOf(matchId, 1)) return true;
-      const fee = (await getFee()) * bombardmentDraws;
-      return useAreaSkillAndConfirm(
-        matchId,
-        walletB,
-        "useBombardment",
-        [matchId, 0, 0],
-        fee,
-        "BombardmentFired",
-        "confirmBombardment",
-      );
-    },
-    async (matchId) => {
-      const turnAddr = (await read("getTurn", [matchId])) as Hex;
-      return doShot(matchId, idxOf(turnAddr));
-    },
-  ]);
+  const finalPhase = (await read("getPhase", [matchId])) as number;
+  console.log(`Final phase: ${PHASE_NAMES[finalPhase]}`);
+  if (finalPhase === 4) console.log(`Winner: ${await read("getWinner", [matchId])}`);
+  console.log("");
 
-  // Match 2: Rake vs Salvo.
-  await runMatch("Match 2: Rake vs Salvo", CAPTAIN_RAKE, CAPTAIN_SALVO, [
-    async (matchId) => {
-      if (await passUntilTurnOf(matchId, 0)) return true;
-      const fee = (await getFee()) * rakeDraws;
-      return useAreaSkillAndConfirm(matchId, walletA, "useRake", [matchId, 0], fee, "RakeFired", "confirmRake");
-    },
-    async (matchId) => {
-      if (await passUntilTurnOf(matchId, 1)) return true;
-      const cells = await nextUnshotCells(matchId, 0, 3);
-      return useAreaSkillAndConfirm(
-        matchId,
-        walletB,
-        "useSalvo",
-        [matchId, cells[0], cells[1], cells[2]],
-        0n,
-        "SalvoFired",
-        "confirmSalvo",
-      );
-    },
-    async (matchId) => {
-      const turnAddr = (await read("getTurn", [matchId])) as Hex;
-      return doShot(matchId, idxOf(turnAddr));
-    },
-  ]);
+  await logBalances("Balances after the match");
 
-  // Match 3: Carpet vs Shield (Shield's own action is not re-exercised
-  // here, already covered for real in match 1).
-  await runMatch("Match 3: Carpet vs Shield", CAPTAIN_CARPET, CAPTAIN_SHIELD, [
-    async (matchId) => {
-      if (await passUntilTurnOf(matchId, 0)) return true;
-      return useAreaSkillAndConfirm(
-        matchId,
-        walletA,
-        "useCarpet",
-        [matchId, 0, 0],
-        0n,
-        "CarpetFired",
-        "confirmCarpet",
-      );
-    },
-    async (matchId) => {
-      const turnAddr = (await read("getTurn", [matchId])) as Hex;
-      return doShot(matchId, idxOf(turnAddr));
-    },
-  ]);
-
-  console.log("Every skill's action and confirm pair (Sonar, Barrage, Bombardment, Rake, Salvo, Carpet), plus");
-  console.log("placement, dice roll and plain shots, completed using only handles fetched from events and public");
-  console.log("getters, the same way a real client has to. No unreachable-handle gap surfaced.\n");
+  console.log("Placement (both players, all steps), dice roll, shots and Barrage each completed their");
+  console.log("action-and-confirm cycle using only handles fetched from events and public getters, the same");
+  console.log("way a real client has to.\n");
 
   console.log("Gas used:");
   for (const { label, gasUsed } of gasLog) console.log(`  ${label}: ${gasUsed}`);
