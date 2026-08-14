@@ -106,6 +106,26 @@ function findEvent(receipt: TransactionReceipt, eventName: string) {
 }
 
 const gasLog: Array<{ label: string; gasUsed: bigint }> = [];
+const moveLog: Array<{ label: string; ms: number }> = [];
+
+// Measures real wall clock time from the start of one full move (an
+// action's write, its attestation fetch, and its confirm's write) to the
+// confirm landing. This is the number that matters for real UX: how long
+// a player actually waits for their move to resolve on screen. Each
+// write() call below this already sleeps 1.5s afterward as a defensive
+// pause against reading stale state from a load balanced RPC, so every
+// measurement here includes about 3.0s of that fixed pause (one after
+// the action's write, one after the confirm's write), on top of the real
+// network and chain time. Reported as measured, the fixed pause noted
+// separately in the summary rather than subtracted out silently.
+async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now();
+  const result = await fn();
+  const ms = Date.now() - start;
+  moveLog.push({ label, ms });
+  console.log(`  (${label}: ${(ms / 1000).toFixed(1)}s send to confirm)`);
+  return result;
+}
 
 async function main() {
   console.log("Ciphertide headless end-to-end run, Base Sepolia\n");
@@ -173,18 +193,24 @@ async function main() {
   // gas, right against a plain geth-style default RPCGasCap of 50 million).
   // Passing an explicit gas limit skips estimation entirely.
   //
-  // On a free public RPC this only gets you to the next wall: every
-  // public endpoint tried here (sepolia.base.org, publicnode, drpc) also
-  // rejects eth_sendRawTransaction itself once the declared gas limit
-  // passes some lower policy ceiling of its own, seen anywhere from about
-  // 20 million to 50 million depending on which backend node answers,
-  // still short of the ~51 to 55 million placeMyBoard actually needs. That
-  // is a real, separate ceiling from estimateGas's, and it is the genuine
-  // blocker recorded in this session's report, not something this script
-  // can work around: it needs a private or paid RPC (Alchemy, Infura, and
-  // so on) configured with a higher per-transaction gas allowance in
-  // BASE_SEPOLIA_RPC_URL. The values below are generous headroom for that
-  // case, real gas used is what gets billed, not the limit.
+  // This only gets you to the next wall, and it is not specific to free
+  // public RPCs: every endpoint tried here, including a paid Alchemy
+  // Base Sepolia endpoint, also rejects eth_sendRawTransaction itself
+  // once the declared gas limit passes a policy ceiling of its own.
+  // sepolia.base.org, publicnode and drpc reject anywhere from about 20
+  // to 50 million depending on which backend node answers; the Alchemy
+  // endpoint tested here accepts up to somewhere between 15 and 20
+  // million (confirmed by an actual included, out-of-gas-reverted
+  // transaction at 14 to 15 million, and an outright "gas limit too
+  // high" rejection at 20 million and up). All of these sit well short
+  // of the ~51 to 55 million placeMyBoard actually needs. This is a real,
+  // separate ceiling from estimateGas's, and it is the genuine blocker
+  // recorded in this session's report, not something this script can
+  // work around from the client side: it needs an RPC provider (or a
+  // higher tier of one) configured with a per-transaction gas allowance
+  // above roughly 55 million for BASE_SEPOLIA_RPC_URL. The values below
+  // are generous headroom for that case, real gas used is what gets
+  // billed, not the limit.
   const explicitGasLimits: Record<string, bigint> = {
     placeMyBoard: 120_000_000n,
     useBombardment: 80_000_000n,
@@ -266,12 +292,14 @@ async function main() {
     const fee = (await getFee()) * placementDraws;
     console.log(`${label}: placing board (${placementDraws} random draws, fee ${fee} wei)...`);
     for (let attempt = 0; attempt < 3; attempt++) {
-      const receipt = await write(wallet, "placeMyBoard", [matchId], fee);
-      console.log(`${label}: placement submitted, gas ${receipt.gasUsed}`);
-      const { allPlacedHandle } = findEvent(receipt, "PlacementSubmitted") as { allPlacedHandle: Hex };
-      const [{ attestation, signatures }] = await revealAsAttestations([allPlacedHandle]);
-      const confirmReceipt = await write(wallet, "confirmPlacement", [matchId, idx, attestation, signatures]);
-      const allPlaced = nonZero(attestation.value);
+      const { receipt, confirmReceipt, allPlaced } = await timed(`${label} placement`, async () => {
+        const receipt = await write(wallet, "placeMyBoard", [matchId], fee);
+        console.log(`${label}: placement submitted, gas ${receipt.gasUsed}`);
+        const { allPlacedHandle } = findEvent(receipt, "PlacementSubmitted") as { allPlacedHandle: Hex };
+        const [{ attestation, signatures }] = await revealAsAttestations([allPlacedHandle]);
+        const confirmReceipt = await write(wallet, "confirmPlacement", [matchId, idx, attestation, signatures]);
+        return { receipt, confirmReceipt, allPlaced: nonZero(attestation.value) };
+      });
       console.log(`${label}: confirmPlacement gas ${confirmReceipt.gasUsed}, allPlaced=${allPlaced}`);
       if (allPlaced) return;
       console.log(`${label}: placement did not find a free slot for every ship, retrying...`);
@@ -292,13 +320,15 @@ async function main() {
     while (phase !== 3 /* InProgress */ && attempts < 10) {
       attempts++;
       const fee = (await getFee()) * 2n;
-      const rollReceipt = await write(walletA, "rollDice", [matchId], fee);
-      const { rollAHandle, rollBHandle } = findEvent(rollReceipt, "DiceRolled") as {
-        rollAHandle: Hex;
-        rollBHandle: Hex;
-      };
-      const [a, b] = await revealAsAttestations([rollAHandle, rollBHandle]);
-      await write(walletA, "confirmDiceRoll", [matchId, a.attestation, a.signatures, b.attestation, b.signatures]);
+      await timed("dice roll", async () => {
+        const rollReceipt = await write(walletA, "rollDice", [matchId], fee);
+        const { rollAHandle, rollBHandle } = findEvent(rollReceipt, "DiceRolled") as {
+          rollAHandle: Hex;
+          rollBHandle: Hex;
+        };
+        const [a, b] = await revealAsAttestations([rollAHandle, rollBHandle]);
+        await write(walletA, "confirmDiceRoll", [matchId, a.attestation, a.signatures, b.attestation, b.signatures]);
+      });
       phase = (await read("getPhase", [matchId])) as number;
       if (phase !== 3) console.log(`Dice tied on attempt ${attempts}, rerolling (the real reroll on tie path)...`);
     }
@@ -322,37 +352,40 @@ async function main() {
     const defenderIdx = actorIdx === 0 ? 1 : 0;
     const [cell] = await nextUnshotCells(matchId, defenderIdx, 1);
     console.log(`Shot at cell ${cell} (player index ${actorIdx})...`);
-    const receipt = await write(wallet, "shoot", [matchId, cell]);
-    console.log(`shoot() gas ${receipt.gasUsed}`);
-    const { hitHandle, allDestroyedHandle, mineHitHandle, shieldBreakHandle } = findEvent(receipt, "ShotFired") as {
-      hitHandle: Hex;
-      allDestroyedHandle: Hex;
-      mineHitHandle: Hex;
-      shieldBreakHandle: Hex;
-    };
-    const [hit, win, mine, shield] = await revealAsAttestations([
-      hitHandle,
-      allDestroyedHandle,
-      mineHitHandle,
-      shieldBreakHandle,
-    ]);
-    const confirmReceipt = await write(wallet, "confirmShot", [
-      matchId,
-      hit.attestation,
-      hit.signatures,
-      win.attestation,
-      win.signatures,
-      mine.attestation,
-      mine.signatures,
-      shield.attestation,
-      shield.signatures,
-    ]);
-    console.log(
-      `confirmShot gas ${confirmReceipt.gasUsed}, hit=${nonZero(hit.attestation.value)}, ` +
-        `mine=${nonZero(mine.attestation.value)}, shieldBreak=${nonZero(shield.attestation.value)}, ` +
-        `win=${nonZero(win.attestation.value)}\n`,
-    );
-    return nonZero(win.attestation.value);
+    const won = await timed("shoot", async () => {
+      const receipt = await write(wallet, "shoot", [matchId, cell]);
+      console.log(`shoot() gas ${receipt.gasUsed}`);
+      const { hitHandle, allDestroyedHandle, mineHitHandle, shieldBreakHandle } = findEvent(receipt, "ShotFired") as {
+        hitHandle: Hex;
+        allDestroyedHandle: Hex;
+        mineHitHandle: Hex;
+        shieldBreakHandle: Hex;
+      };
+      const [hit, win, mine, shield] = await revealAsAttestations([
+        hitHandle,
+        allDestroyedHandle,
+        mineHitHandle,
+        shieldBreakHandle,
+      ]);
+      const confirmReceipt = await write(wallet, "confirmShot", [
+        matchId,
+        hit.attestation,
+        hit.signatures,
+        win.attestation,
+        win.signatures,
+        mine.attestation,
+        mine.signatures,
+        shield.attestation,
+        shield.signatures,
+      ]);
+      console.log(
+        `confirmShot gas ${confirmReceipt.gasUsed}, hit=${nonZero(hit.attestation.value)}, ` +
+          `mine=${nonZero(mine.attestation.value)}, shieldBreak=${nonZero(shield.attestation.value)}, ` +
+          `win=${nonZero(win.attestation.value)}\n`,
+      );
+      return nonZero(win.attestation.value);
+    });
+    return won;
   }
 
   // Repeatedly takes a plain shot from whoever currently holds the turn
@@ -387,34 +420,38 @@ async function main() {
     firedEventName: string,
     confirmFnName: string,
   ): Promise<boolean> {
-    const receipt = await write(wallet, useFnName, useArgs, fee);
-    console.log(`${useFnName}() gas ${receipt.gasUsed}`);
-    const { packedHandle, allDestroyedHandle } = findEvent(receipt, firedEventName) as {
-      packedHandle: Hex;
-      allDestroyedHandle: Hex;
-    };
-    const [packed, win] = await revealAsAttestations([packedHandle, allDestroyedHandle]);
-    const confirmReceipt = await write(wallet, confirmFnName, [
-      matchId,
-      packed.attestation,
-      packed.signatures,
-      win.attestation,
-      win.signatures,
-    ]);
-    console.log(
-      `${confirmFnName} gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
-        `win=${nonZero(win.attestation.value)}\n`,
-    );
-    return nonZero(win.attestation.value);
+    return timed(useFnName, async () => {
+      const receipt = await write(wallet, useFnName, useArgs, fee);
+      console.log(`${useFnName}() gas ${receipt.gasUsed}`);
+      const { packedHandle, allDestroyedHandle } = findEvent(receipt, firedEventName) as {
+        packedHandle: Hex;
+        allDestroyedHandle: Hex;
+      };
+      const [packed, win] = await revealAsAttestations([packedHandle, allDestroyedHandle]);
+      const confirmReceipt = await write(wallet, confirmFnName, [
+        matchId,
+        packed.attestation,
+        packed.signatures,
+        win.attestation,
+        win.signatures,
+      ]);
+      console.log(
+        `${confirmFnName} gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
+          `win=${nonZero(win.attestation.value)}\n`,
+      );
+      return nonZero(win.attestation.value);
+    });
   }
 
   async function useSonarAndConfirm(matchId: bigint, wallet: typeof walletA): Promise<void> {
-    const receipt = await write(wallet, "useSonar", [matchId, 0, 0]);
-    console.log(`useSonar() gas ${receipt.gasUsed}`);
-    const { resultHandle } = findEvent(receipt, "SonarFired") as { resultHandle: Hex };
-    const [result] = await revealAsAttestations([resultHandle]);
-    const confirmReceipt = await write(wallet, "confirmSonar", [matchId, result.attestation, result.signatures]);
-    console.log(`confirmSonar gas ${confirmReceipt.gasUsed}, anyShip=${nonZero(result.attestation.value)}\n`);
+    await timed("useSonar", async () => {
+      const receipt = await write(wallet, "useSonar", [matchId, 0, 0]);
+      console.log(`useSonar() gas ${receipt.gasUsed}`);
+      const { resultHandle } = findEvent(receipt, "SonarFired") as { resultHandle: Hex };
+      const [result] = await revealAsAttestations([resultHandle]);
+      const confirmReceipt = await write(wallet, "confirmSonar", [matchId, result.attestation, result.signatures]);
+      console.log(`confirmSonar gas ${confirmReceipt.gasUsed}, anyShip=${nonZero(result.attestation.value)}\n`);
+    });
   }
 
   // Decrypts Player A's own board with a wallet-signed attestation
@@ -586,6 +623,14 @@ async function main() {
 
   console.log("Gas used:");
   for (const { label, gasUsed } of gasLog) console.log(`  ${label}: ${gasUsed}`);
+
+  console.log("\nMove latency, send to confirm landing (includes about 3.0s of this script's own");
+  console.log("defensive pause, 1.5s after the action write and 1.5s after the confirm write):");
+  for (const { label, ms } of moveLog) console.log(`  ${label}: ${(ms / 1000).toFixed(1)}s`);
+  if (moveLog.length > 0) {
+    const avgMs = moveLog.reduce((sum, m) => sum + m.ms, 0) / moveLog.length;
+    console.log(`  average: ${(avgMs / 1000).toFixed(1)}s over ${moveLog.length} moves`);
+  }
 }
 
 main().catch((err) => {
