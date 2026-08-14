@@ -190,7 +190,8 @@ contract Ciphertide {
         bytes32 hitHandle,
         bytes32 allDestroyedHandle,
         bytes32 newlyDestroyedHandle,
-        bytes32 shieldBreakHandle
+        bytes32 shieldBreakHandle,
+        bytes32 mineHitHandle
     );
     event ShotResolved(uint256 indexed matchId, uint8 cell, bool hit, bool shieldBreak, address indexed nextTurn);
     event SonarFired(
@@ -758,7 +759,8 @@ contract Ciphertide {
             ebool.unwrap(hit),
             ebool.unwrap(allDestroyed),
             euint256.unwrap(newlyDestroyed),
-            ebool.unwrap(shield.shieldBreak)
+            ebool.unwrap(shield.shieldBreak),
+            ebool.unwrap(mineHit)
         );
     }
 

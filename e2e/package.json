@@ -1,0 +1,19 @@
+{
+  "name": "ciphertide-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Headless end-to-end run of a full Ciphertide match against a live deployment on Base Sepolia, exercising the real Inco Lightning encrypt, call, fetch-attestation, confirm loop. No UI, no frontend dependency.",
+  "scripts": {
+    "e2e": "tsx run.ts"
+  },
+  "dependencies": {
+    "@inco/lightning-js": "^1.0.2",
+    "viem": "^2.55.11"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsx": "^4.19.2",
+    "typescript": "~6.0.2"
+  }
+}
