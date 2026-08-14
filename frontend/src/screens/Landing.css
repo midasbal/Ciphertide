@@ -372,14 +372,24 @@ main {
 
 .captain-slot-art {
   position: relative;
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 1 / 1;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   background:
     repeating-linear-gradient(135deg, var(--ct-color-structure-faint) 0px, var(--ct-color-structure-faint) 1px, transparent 1px, transparent 10px),
     var(--ct-bg-well);
   border-bottom: 1px solid var(--ct-border-faint);
+}
+
+.captain-slot-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
 }
 
 .captain-mark {
@@ -400,18 +410,6 @@ main {
   stroke: none;
 }
 
-.captain-slot-pending {
-  position: absolute;
-  bottom: var(--ct-space-2);
-  right: var(--ct-space-2);
-  font-size: 0.5625rem;
-  letter-spacing: var(--ct-tracking-wider);
-  color: var(--ct-text-ghost);
-  border: 1px solid var(--ct-border-faint);
-  padding: 2px 6px;
-  border-radius: var(--ct-radius-sm);
-}
-
 .captain-slot-meta {
   padding: var(--ct-space-4);
   display: flex;
@@ -428,6 +426,13 @@ main {
 
 .captain-slot-name {
   font-size: var(--ct-text-md);
+}
+
+.captain-slot-skill-name {
+  font-size: var(--ct-text-2xs);
+  color: var(--ct-accent-bright);
+  letter-spacing: var(--ct-tracking-wider);
+  text-transform: uppercase;
 }
 
 .captain-slot-skill {

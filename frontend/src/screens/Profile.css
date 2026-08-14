@@ -301,10 +301,19 @@
 
 .captain-portrait {
   position: relative;
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 1 / 1;
   overflow: hidden;
   background: var(--ct-bg-well);
   border-bottom: 1px solid var(--ct-border-faint);
+}
+
+.captain-portrait-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
 }
 
 .captain-portrait-placeholder {
@@ -395,6 +404,10 @@
   flex-direction: column;
   gap: var(--ct-space-2);
   flex: 1;
+}
+
+.captain-card-name {
+  font-size: var(--ct-text-md);
 }
 
 .captain-card-label {

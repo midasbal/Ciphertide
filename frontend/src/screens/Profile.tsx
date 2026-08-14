@@ -190,7 +190,7 @@ function CaptainCard({
         onClick={() => onSelect(captain)}
         disabled={!isUnlocked}
         aria-pressed={isSelected}
-        aria-label={`${isSelected ? 'Selected' : 'Select'} ${captain.code} ${captain.name}`}
+        aria-label={`${isSelected ? 'Selected' : 'Select'} ${captain.name}, ${captain.code} ${captain.skillName}`}
       >
         <CaptainPortrait captain={captain} />
         {!isUnlocked && (
@@ -203,8 +203,9 @@ function CaptainCard({
       </button>
 
       <div className="captain-card-meta">
+        <h3 className="captain-card-name">{captain.name}</h3>
         <span className="ct-mono captain-card-label">
-          {captain.code} // {captain.name.toUpperCase()}
+          {captain.code} // {captain.skillName.toUpperCase()}
         </span>
         <p className="captain-card-description">{captain.description}</p>
         <div className="captain-card-tags">
@@ -231,34 +232,42 @@ function CaptainCard({
 }
 
 /**
- * The portrait frame. The `captain-portrait-placeholder` layer is the
- * whole story until real art exists: a per-captain vector sigil over
- * sonar rings, built entirely from design tokens. It is kept as its own
- * absolutely positioned layer so a future `<img class="captain-portrait-image">`
- * can be dropped in on top of (or in place of) it with no layout change.
+ * The portrait frame. Renders the real captain portrait; the
+ * `captain-portrait-placeholder` layer (a per-captain vector sigil over
+ * sonar rings, built entirely from design tokens) only shows if the
+ * image fails to load, so the frame never goes blank.
  */
 function CaptainPortrait({ captain }: { captain: Captain }) {
+  const [imageFailed, setImageFailed] = useState(false)
+
   return (
     <div className="captain-portrait">
-      <div className="captain-portrait-placeholder">
-        <svg
-          viewBox="0 0 120 120"
-          className="captain-portrait-rings"
-          style={{ transform: `rotate(${(captain.id - 1) * 23}deg)` }}
-          aria-hidden="true"
-        >
-          <circle cx="60" cy="60" r="30" />
-          <circle cx="60" cy="60" r="46" />
-          <circle cx="60" cy="60" r="58" />
-          <line x1="60" y1="2" x2="60" y2="14" />
-          <line x1="60" y1="106" x2="60" y2="118" />
-          <line x1="2" y1="60" x2="14" y2="60" />
-          <line x1="106" y1="60" x2="118" y2="60" />
-        </svg>
-        <CaptainMark kind={captain.mark} className="captain-portrait-mark" />
-      </div>
-      {/* Placeholder layer above. Drop a real <img class="captain-portrait-image" src="..." />
-          as the next child here to replace it with minimal change once portrait art lands. */}
+      {imageFailed ? (
+        <div className="captain-portrait-placeholder">
+          <svg
+            viewBox="0 0 120 120"
+            className="captain-portrait-rings"
+            style={{ transform: `rotate(${(captain.id - 1) * 23}deg)` }}
+            aria-hidden="true"
+          >
+            <circle cx="60" cy="60" r="30" />
+            <circle cx="60" cy="60" r="46" />
+            <circle cx="60" cy="60" r="58" />
+            <line x1="60" y1="2" x2="60" y2="14" />
+            <line x1="60" y1="106" x2="60" y2="118" />
+            <line x1="2" y1="60" x2="14" y2="60" />
+            <line x1="106" y1="60" x2="118" y2="60" />
+          </svg>
+          <CaptainMark kind={captain.mark} className="captain-portrait-mark" />
+        </div>
+      ) : (
+        <img
+          className="captain-portrait-image"
+          src={captain.portrait}
+          alt={captain.name}
+          onError={() => setImageFailed(true)}
+        />
+      )}
     </div>
   )
 }

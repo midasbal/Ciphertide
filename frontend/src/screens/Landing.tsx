@@ -4,7 +4,7 @@ import Reveal from '../components/reveal/Reveal'
 import CipherCell from '../components/cipher/CipherCell'
 import DecryptReadout from '../components/cipher/DecryptReadout'
 import CaptainMark from '../components/captains/CaptainMark'
-import { CAPTAINS } from './captains'
+import { CAPTAINS, type Captain } from './captains'
 import './Landing.css'
 
 const PROCESS_STEPS: Array<{
@@ -165,7 +165,7 @@ export default function Landing() {
             <h2 className="landing-section-title">Every captain carries one signature strike</h2>
             <p className="landing-section-lede">
               Past the standard shot, one captain and one tactic per match. A wide sweep, a saturating volley, a
-              precision cut down a row. Portraits are reserved slots, not yet commissioned.
+              precision cut down a row.
             </p>
           </Reveal>
 
@@ -173,12 +173,12 @@ export default function Landing() {
             {CAPTAINS.map((captain, i) => (
               <Reveal key={captain.code} delayMs={i * 70} className="captain-slot">
                 <div className="captain-slot-art">
-                  <CaptainMark kind={captain.mark} />
-                  <span className="captain-slot-pending ct-mono">ART PENDING</span>
+                  <CaptainPortrait captain={captain} />
                 </div>
                 <div className="captain-slot-meta">
                   <span className="ct-mono captain-slot-code">{captain.code}</span>
                   <h3 className="captain-slot-name">{captain.name}</h3>
+                  <p className="captain-slot-skill-name ct-mono">{captain.skillName}</p>
                   <p className="captain-slot-skill">{captain.teaser}</p>
                 </div>
               </Reveal>
@@ -222,5 +222,29 @@ export default function Landing() {
         </div>
       </footer>
     </div>
+  )
+}
+
+/**
+ * Renders the real captain portrait; falls back to the vector sigil mark
+ * only if the image fails to load. Lazy loaded since the captains
+ * section sits below the fold.
+ */
+function CaptainPortrait({ captain }: { captain: Captain }) {
+  const [imageFailed, setImageFailed] = useState(false)
+
+  if (imageFailed) {
+    return <CaptainMark kind={captain.mark} />
+  }
+
+  return (
+    <img
+      className="captain-slot-image"
+      src={captain.portrait}
+      alt={captain.name}
+      loading="lazy"
+      decoding="async"
+      onError={() => setImageFailed(true)}
+    />
   )
 }
