@@ -3,6 +3,8 @@ import SonarBackdrop from '../components/hero/SonarBackdrop'
 import Reveal from '../components/reveal/Reveal'
 import CipherCell from '../components/cipher/CipherCell'
 import DecryptReadout from '../components/cipher/DecryptReadout'
+import CaptainMark from '../components/captains/CaptainMark'
+import { CAPTAINS } from './captains'
 import './Landing.css'
 
 const PROCESS_STEPS: Array<{
@@ -37,15 +39,8 @@ const PROCESS_STEPS: Array<{
   },
 ]
 
-const CAPTAINS: Array<{ code: string; name: string; skill: string; mark: 'shield' | 'bombardment' | 'rake' | 'salvo' | 'carpet' }> = [
-  { code: 'CPT-01', name: 'Shield', skill: 'Warps a single cell against the next confirmed hit.', mark: 'shield' },
-  { code: 'CPT-02', name: 'Bombardment', skill: 'Saturates a fixed pattern across a wide target area.', mark: 'bombardment' },
-  { code: 'CPT-03', name: 'Rake', skill: 'Strikes the length of a chosen row in one pass.', mark: 'rake' },
-  { code: 'CPT-04', name: 'Salvo', skill: 'Commits three chosen coordinates in a single volley.', mark: 'salvo' },
-  { code: 'CPT-05', name: 'Carpet', skill: 'Saturates a small area, but only ever speaks if it lands.', mark: 'carpet' },
-]
-
 const FOOTER_LINKS = [
+  { label: 'Profile', href: '/?screen=profile', external: false },
   { label: 'Docs', href: 'https://docs.inco.org', external: true },
   { label: 'GitHub', href: 'https://github.com/midasbal/Ciphertide', external: true },
   { label: 'Inco', href: 'https://inco.org', external: true },
@@ -84,6 +79,7 @@ export default function Landing() {
           <a href="#hook">Brief</a>
           <a href="#how">Protocol</a>
           <a href="#captains">Captains</a>
+          <a href="/?screen=profile">Profile</a>
           <a href="/?screen=match">Console</a>
         </nav>
       </header>
@@ -183,7 +179,7 @@ export default function Landing() {
                 <div className="captain-slot-meta">
                   <span className="ct-mono captain-slot-code">{captain.code}</span>
                   <h3 className="captain-slot-name">{captain.name}</h3>
-                  <p className="captain-slot-skill">{captain.skill}</p>
+                  <p className="captain-slot-skill">{captain.teaser}</p>
                 </div>
               </Reveal>
             ))}
@@ -226,43 +222,5 @@ export default function Landing() {
         </div>
       </footer>
     </div>
-  )
-}
-
-/** Abstract geometric insignia, never a figurative portrait, standing in
- * for captain art that has not been commissioned yet. Each mark is a
- * distinct simple composition in the accent and structure blues so the
- * five slots read as a set without inventing a face for any of them. */
-function CaptainMark({ kind }: { kind: 'shield' | 'bombardment' | 'rake' | 'salvo' | 'carpet' }) {
-  return (
-    <svg viewBox="0 0 96 96" className={`captain-mark captain-mark--${kind}`} aria-hidden="true">
-      {kind === 'shield' && <path d="M48 12 L80 24 V48 C80 68 66 82 48 88 C30 82 16 68 16 48 V24 Z" />}
-      {kind === 'bombardment' && (
-        <g>
-          <circle cx="48" cy="48" r="6" />
-          <circle cx="24" cy="30" r="4" />
-          <circle cx="70" cy="30" r="4" />
-          <circle cx="24" cy="66" r="4" />
-          <circle cx="70" cy="66" r="4" />
-          <circle cx="48" cy="18" r="4" />
-          <circle cx="48" cy="78" r="4" />
-        </g>
-      )}
-      {kind === 'rake' && (
-        <g>
-          <line x1="14" y1="30" x2="82" y2="30" />
-          <line x1="14" y1="48" x2="82" y2="48" />
-          <line x1="14" y1="66" x2="82" y2="66" />
-        </g>
-      )}
-      {kind === 'salvo' && (
-        <g>
-          <circle cx="30" cy="34" r="7" />
-          <circle cx="66" cy="34" r="7" />
-          <circle cx="48" cy="66" r="7" />
-        </g>
-      )}
-      {kind === 'carpet' && <rect x="20" y="20" width="56" height="56" />}
-    </svg>
   )
 }

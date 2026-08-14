@@ -1,0 +1,503 @@
+.profile {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------------
+ * Nav
+ * --------------------------------------------------------------- */
+
+.profile-nav {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 82rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6);
+}
+
+.profile-nav-mark {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ct-space-2);
+  font-family: var(--ct-font-display);
+  font-weight: 600;
+  font-size: var(--ct-text-md);
+  letter-spacing: var(--ct-tracking-widest);
+  color: var(--ct-text-primary);
+  text-decoration: none;
+}
+
+.profile-nav-glyph {
+  color: var(--ct-accent);
+  text-shadow: 0 0 14px var(--ct-accent-soft);
+}
+
+.profile-nav-links {
+  display: flex;
+  gap: var(--ct-space-6);
+  font-size: var(--ct-text-xs);
+  letter-spacing: var(--ct-tracking-wider);
+  text-transform: uppercase;
+}
+
+.profile-nav-links a {
+  color: var(--ct-text-secondary);
+  text-decoration: none;
+  transition: color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.profile-nav-links a:hover {
+  color: var(--ct-accent-bright);
+}
+
+/* ---------------------------------------------------------------
+ * Main and the console frame
+ * --------------------------------------------------------------- */
+
+.profile-main {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  max-width: 88rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6) var(--ct-space-8);
+}
+
+.profile-console-frame {
+  position: relative;
+  background: var(--ct-bg-panel);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-lg);
+  box-shadow: var(--ct-shadow-panel);
+  overflow: hidden;
+}
+
+.profile-corner {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--ct-border-strong);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.profile-corner--tl {
+  top: -1px;
+  left: -1px;
+  border-right: none;
+  border-bottom: none;
+}
+
+.profile-corner--tr {
+  top: -1px;
+  right: -1px;
+  border-left: none;
+  border-bottom: none;
+}
+
+.profile-corner--bl {
+  bottom: -1px;
+  left: -1px;
+  border-right: none;
+  border-top: none;
+}
+
+.profile-corner--br {
+  bottom: -1px;
+  right: -1px;
+  border-left: none;
+  border-top: none;
+}
+
+/* Reveal failsafe: if the intersection observer never fires, force every
+ * reveal on this page visible after a beat so the page can never be left
+ * blank. Harmless when JS already revealed it earlier. */
+.profile .reveal {
+  animation: profile-reveal-failsafe 0ms 900ms forwards;
+}
+
+@keyframes profile-reveal-failsafe {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .profile .reveal {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Header band: title, kicker, Salvage readout
+ * --------------------------------------------------------------- */
+
+.profile-header {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--ct-border-faint);
+}
+
+.profile-header-backdrop {
+  position: absolute;
+  inset: 0;
+  opacity: 0.28;
+  pointer-events: none;
+}
+
+.profile-header-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ct-space-5);
+  padding: var(--ct-space-6);
+}
+
+.profile-header-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-3);
+  flex: 1 1 20rem;
+}
+
+.profile-title {
+  font-size: clamp(1.75rem, 3.4vw, var(--ct-text-2xl));
+  line-height: var(--ct-leading-tight);
+}
+
+.profile-sub {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-base);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  max-width: 34rem;
+  margin: 0;
+}
+
+.profile-salvage {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--ct-space-1);
+  padding: var(--ct-space-3) var(--ct-space-4);
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-md);
+}
+
+.profile-salvage-label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ct-space-1);
+}
+
+.profile-salvage-preview {
+  color: var(--ct-text-ghost);
+  text-transform: none;
+  letter-spacing: var(--ct-tracking-normal);
+}
+
+.profile-salvage-value {
+  font-size: var(--ct-text-xl);
+  color: var(--ct-accent-bright);
+  text-shadow: 0 0 14px var(--ct-accent-soft);
+}
+
+/* ---------------------------------------------------------------
+ * Roster grid
+ * --------------------------------------------------------------- */
+
+.profile-grid {
+  padding: var(--ct-space-6);
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--ct-space-5);
+}
+
+@media (max-width: 980px) {
+  .profile-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .profile-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .profile-main {
+    padding: var(--ct-space-4) var(--ct-space-4) var(--ct-space-7);
+  }
+
+  .profile-header-content {
+    padding: var(--ct-space-5) var(--ct-space-4);
+  }
+
+  .profile-grid {
+    padding: var(--ct-space-4);
+    gap: var(--ct-space-4);
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Captain card
+ * --------------------------------------------------------------- */
+
+.captain-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--ct-bg-panel-raised);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-lg);
+  overflow: hidden;
+  transition:
+    border-color var(--ct-duration-standard) var(--ct-ease-standard),
+    box-shadow var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.captain-card:not(.captain-card--locked):hover {
+  border-color: var(--ct-border);
+}
+
+.captain-card--selected {
+  border-color: var(--ct-border-live);
+  box-shadow: var(--ct-glow-accent);
+}
+
+.captain-card-portrait-btn {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  text-align: left;
+}
+
+.captain-card-portrait-btn:disabled {
+  cursor: not-allowed;
+}
+
+.captain-card-portrait-btn:focus-visible {
+  outline: 2px solid var(--ct-border-live);
+  outline-offset: -2px;
+}
+
+.captain-portrait {
+  position: relative;
+  aspect-ratio: 3 / 4;
+  overflow: hidden;
+  background: var(--ct-bg-well);
+  border-bottom: 1px solid var(--ct-border-faint);
+}
+
+.captain-portrait-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 42%, var(--ct-color-structure-faint), var(--ct-bg-well) 72%);
+}
+
+.captain-portrait-rings {
+  position: absolute;
+  width: 84%;
+  height: 84%;
+  fill: none;
+  stroke: var(--ct-color-structure-soft);
+  stroke-width: 1;
+}
+
+.captain-card--selected .captain-portrait-rings {
+  stroke: var(--ct-border-live);
+}
+
+.captain-portrait-mark {
+  position: relative;
+  width: 44%;
+  height: 44%;
+  fill: none;
+  stroke: var(--ct-accent-bright);
+  stroke-width: 2;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 8px var(--ct-accent-soft));
+}
+
+.captain-portrait-mark.captain-mark--rake {
+  stroke-width: 3;
+}
+
+.captain-portrait-mark.captain-mark--bombardment circle:first-child {
+  fill: var(--ct-accent-bright);
+  stroke: none;
+}
+
+.captain-card--locked .captain-portrait-placeholder {
+  opacity: 0.5;
+}
+
+.captain-card-lock-badge {
+  position: absolute;
+  top: var(--ct-space-2);
+  right: var(--ct-space-2);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.5625rem;
+  letter-spacing: var(--ct-tracking-wider);
+  color: var(--ct-text-secondary);
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-sm);
+  padding: 2px 6px;
+}
+
+.captain-card-lock-glyph {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: var(--ct-text-secondary);
+  stroke-width: 2;
+}
+
+.captain-card-selected-tag {
+  position: absolute;
+  top: var(--ct-space-2);
+  left: var(--ct-space-2);
+  color: var(--ct-color-glow-bright);
+  border: 1px solid var(--ct-border-live);
+  border-radius: var(--ct-radius-sm);
+  padding: 2px 6px;
+  font-size: 0.5625rem;
+  background: var(--ct-bg-well);
+}
+
+.captain-card-meta {
+  padding: var(--ct-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-2);
+  flex: 1;
+}
+
+.captain-card-label {
+  font-size: var(--ct-text-xs);
+  color: var(--ct-text-tertiary);
+  letter-spacing: var(--ct-tracking-wider);
+}
+
+.captain-card-description {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-xs);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  margin: 0;
+}
+
+.captain-card-tags {
+  display: flex;
+  gap: var(--ct-space-2);
+  margin-top: auto;
+  padding-top: var(--ct-space-2);
+}
+
+.captain-card-tag {
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-sm);
+  padding: 2px 6px;
+  font-size: 0.5625rem;
+  color: var(--ct-text-tertiary);
+}
+
+.captain-card-unlock {
+  margin-top: var(--ct-space-2);
+  padding-top: var(--ct-space-3);
+  border-top: 1px solid var(--ct-border-faint);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ct-space-2);
+}
+
+.captain-card-cost {
+  font-size: var(--ct-text-xs);
+  color: var(--ct-text-secondary);
+  min-width: 0;
+}
+
+.captain-card-unlock-btn {
+  appearance: none;
+  flex-shrink: 0;
+  border: 1px solid var(--ct-border-live);
+  background: var(--ct-color-glow-faint);
+  color: var(--ct-accent-bright);
+  font-family: var(--ct-font-mono);
+  font-size: var(--ct-text-xs);
+  letter-spacing: var(--ct-tracking-wide);
+  text-transform: uppercase;
+  padding: var(--ct-space-1) var(--ct-space-3);
+  border-radius: var(--ct-radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--ct-duration-standard) var(--ct-ease-standard),
+    color var(--ct-duration-standard) var(--ct-ease-standard),
+    border-color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.captain-card-unlock-btn:hover:not(:disabled) {
+  background: var(--ct-accent-soft);
+  color: var(--ct-text-primary);
+}
+
+.captain-card-unlock-btn:focus-visible {
+  outline: 2px solid var(--ct-border-live);
+  outline-offset: 2px;
+}
+
+.captain-card-unlock-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: var(--ct-border-faint);
+  background: transparent;
+  color: var(--ct-text-tertiary);
+}
+
+/* ---------------------------------------------------------------
+ * Footer
+ * --------------------------------------------------------------- */
+
+.profile-footer {
+  position: relative;
+  z-index: 1;
+  max-width: 88rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ct-space-2);
+  border-top: 1px solid var(--ct-border-faint);
+  font-size: var(--ct-text-2xs);
+  color: var(--ct-text-ghost);
+  letter-spacing: var(--ct-tracking-wide);
+}

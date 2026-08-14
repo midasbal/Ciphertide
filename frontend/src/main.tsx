@@ -23,10 +23,15 @@ const isAimingDemo = params.get('screen') === 'aiming'
 // Visit /?screen=leaderboard to reach it.
 const isLeaderboard = params.get('screen') === 'leaderboard'
 
+// Captain select, off-chain profile state kept in localStorage, no
+// contract wiring. Visit /?screen=profile to reach it.
+const isProfile = params.get('screen') === 'profile'
+
 const DevHarness = lazy(() => import('./dev/harness.tsx'))
 const MatchScreen = lazy(() => import('./screens/MatchScreen.tsx'))
 const AimingDemo = lazy(() => import('./App.tsx'))
 const Leaderboard = lazy(() => import('./screens/Leaderboard.tsx'))
+const Profile = lazy(() => import('./screens/Profile.tsx'))
 
 function Root() {
   if (isHarness) {
@@ -54,6 +59,13 @@ function Root() {
     return (
       <Suspense fallback={null}>
         <Leaderboard />
+      </Suspense>
+    )
+  }
+  if (isProfile) {
+    return (
+      <Suspense fallback={null}>
+        <Profile />
       </Suspense>
     )
   }
