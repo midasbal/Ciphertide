@@ -19,9 +19,14 @@ const isMatchSample = params.get('screen') === 'match'
 // deleted, since it still exercises the OpponentSeaBoard aiming preview.
 const isAimingDemo = params.get('screen') === 'aiming'
 
+// Fleet standings mock, static sample data only, no contract wiring.
+// Visit /?screen=leaderboard to reach it.
+const isLeaderboard = params.get('screen') === 'leaderboard'
+
 const DevHarness = lazy(() => import('./dev/harness.tsx'))
 const MatchScreen = lazy(() => import('./screens/MatchScreen.tsx'))
 const AimingDemo = lazy(() => import('./App.tsx'))
+const Leaderboard = lazy(() => import('./screens/Leaderboard.tsx'))
 
 function Root() {
   if (isHarness) {
@@ -42,6 +47,13 @@ function Root() {
     return (
       <Suspense fallback={null}>
         <AimingDemo />
+      </Suspense>
+    )
+  }
+  if (isLeaderboard) {
+    return (
+      <Suspense fallback={null}>
+        <Leaderboard />
       </Suspense>
     )
   }
