@@ -1,0 +1,101 @@
+.sonar-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.sonar-backdrop-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.sonar-backdrop-parallax {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+
+.sonar-backdrop-rings {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: min(150vh, 1100px);
+  height: min(150vh, 1100px);
+  transform: translate(-50%, -50%);
+  opacity: 0.16;
+  overflow: visible;
+}
+
+.sonar-backdrop-rings circle,
+.sonar-backdrop-rings line {
+  fill: none;
+  stroke: var(--ct-color-glow);
+  stroke-width: 1;
+}
+
+.sonar-backdrop-sweep {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: min(150vh, 1100px);
+  height: min(150vh, 1100px);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--ct-color-glow-soft) 0deg, transparent 26deg, transparent 360deg);
+  opacity: 0.55;
+  mask-image: radial-gradient(circle, black 38%, transparent 72%);
+  animation: hero-sweep-rotate 11s linear infinite;
+}
+
+@keyframes hero-sweep-rotate {
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+.sonar-backdrop-ping {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: 60px;
+  height: 60px;
+  margin: -30px 0 0 -30px;
+  border-radius: 50%;
+  border: 1px solid var(--ct-color-glow);
+  opacity: 0;
+  animation: hero-ping 7s var(--ct-ease-sonar) infinite;
+}
+
+.sonar-backdrop-ping--b {
+  animation-delay: 3.5s;
+}
+
+@keyframes hero-ping {
+  0% {
+    transform: scale(0.3);
+    opacity: 0.45;
+  }
+  70% {
+    opacity: 0;
+  }
+  100% {
+    transform: scale(10);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sonar-backdrop-sweep,
+  .sonar-backdrop-ping {
+    animation: none;
+    opacity: 0;
+  }
+
+  .sonar-backdrop-parallax {
+    transform: none !important;
+  }
+}
