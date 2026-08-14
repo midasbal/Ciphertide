@@ -271,6 +271,48 @@ async function main() {
     throw lastError;
   }
 
+  const readyLog: Array<{ label: string; ms: number }> = [];
+
+  // Precisely measures the true reveal-ready time: from action tx mined to
+  // the first genuine attestedReveal success, polled every 1.5s with
+  // exactly one real network attempt per poll (maxRetries: 1, not 0: the
+  // SDK's retryWithBackoff loop runs while attempt < maxRetries, so 0
+  // iterates zero times and throws immediately without ever calling the
+  // covalidator). This is the number that isolates real covalidator
+  // latency from the coarse exponential backoff revealAsAttestations
+  // above uses for its retries, which overstates true latency for fast
+  // reveals since its own growing delay dominates. Returns the same
+  // attestation shape as revealAsAttestations so the result can be used
+  // directly in the following confirm call, no second fetch needed.
+  async function tightPollReveal(label: string, handles: Hex[]) {
+    const minedAt = Date.now();
+    console.log(`  (${label}: tight polling attestedReveal every 1.5s, one real attempt per poll...)`);
+    for (let attempt = 1; attempt <= 150; attempt++) {
+      try {
+        const results = await zap.attestedReveal(handles, {
+          backoffConfig: { maxRetries: 1, baseDelayInMs: 0, backoffFactor: 1 },
+        });
+        if (results.length === handles.length) {
+          const readyMs = Date.now() - minedAt;
+          readyLog.push({ label, ms: readyMs });
+          console.log(`  (${label}: true reveal-ready ${(readyMs / 1000).toFixed(1)}s, ${attempt} tight-poll attempts)`);
+          const byHandle = new Map(results.map((r: any) => [r.handle.toLowerCase(), r]));
+          return handles.map((h) => {
+            const r: any = byHandle.get(h.toLowerCase());
+            return {
+              attestation: { handle: r.handle as Hex, value: toHex(r.plaintext.value, { size: 32 }) as Hex },
+              signatures: r.covalidatorSignatures.map((s: Uint8Array) => toHex(s)) as Hex[],
+            };
+          });
+        }
+      } catch {
+        // Not ready yet, the loop's own 1.5s spacing is the only delay.
+      }
+      await sleep(1500);
+    }
+    throw new Error(`${label}: tight poll gave up after 150 attempts`);
+  }
+
   // Player A always creates, Player B always joins, so player index 0 is
   // always A and index 1 is always B for this match.
   const idxOf = (addr: Hex) => (addr.toLowerCase() === accountA.address.toLowerCase() ? 0 : 1);
@@ -280,11 +322,8 @@ async function main() {
   const PLACEMENT_ATTEMPTS_PER_SHIP = await readConst("PLACEMENT_ATTEMPTS_PER_SHIP");
   const MINES_PER_PLAYER = await readConst("MINES_PER_PLAYER");
   const MINE_PLACEMENT_ATTEMPTS = await readConst("MINE_PLACEMENT_ATTEMPTS");
-  const BARRAGE_MAX_CELLS = await readConst("BARRAGE_MAX_CELLS");
-  const BARRAGE_ATTEMPTS_PER_CELL = await readConst("BARRAGE_ATTEMPTS_PER_CELL");
-  const barrageDraws = 1n + BARRAGE_MAX_CELLS * BARRAGE_ATTEMPTS_PER_CELL;
-  const CAPTAIN_SHIELD = await readConst("CAPTAIN_SHIELD");
   const CAPTAIN_BOMBARDMENT = await readConst("CAPTAIN_BOMBARDMENT");
+  const CAPTAIN_RAKE = await readConst("CAPTAIN_RAKE");
 
   // Placement is spread across NUM_SHIPS + 1 separate placeMyBoardStep
   // calls, one ship per call, then a final call that places both mines
@@ -312,7 +351,7 @@ async function main() {
         const receipt = await write(wallet, "placeMyBoardStep", [matchId], mineFee);
         console.log(`${label}: mines and reveal step submitted, gas ${receipt.gasUsed}`);
         const { allPlacedHandle } = findEvent(receipt, "PlacementSubmitted") as { allPlacedHandle: Hex };
-        const [{ attestation, signatures }] = await revealAsAttestations([allPlacedHandle]);
+        const [{ attestation, signatures }] = await tightPollReveal(`${label} placement`, [allPlacedHandle]);
         const confirmReceipt = await write(wallet, "confirmPlacement", [matchId, idx, attestation, signatures]);
         return { confirmReceipt, allPlaced: nonZero(attestation.value) };
       });
@@ -390,7 +429,7 @@ async function main() {
         mineHitHandle: Hex;
         shieldBreakHandle: Hex;
       };
-      const [hit, win, mine, shield] = await revealAsAttestations([
+      const [hit, win, mine, shield] = await tightPollReveal("shoot", [
         hitHandle,
         allDestroyedHandle,
         mineHitHandle,
@@ -417,17 +456,30 @@ async function main() {
     return won;
   }
 
-  async function useBarrageAndConfirm(matchId: bigint, wallet: typeof walletA): Promise<boolean> {
-    const fee = (await getFee()) * barrageDraws;
-    return timed("useBarrage", async () => {
-      const receipt = await write(wallet, "useBarrage", [matchId, 0, 0], fee);
-      console.log(`useBarrage() gas ${receipt.gasUsed}`);
-      const { packedHandle, allDestroyedHandle } = findEvent(receipt, "BarrageFired") as {
+  // Barrage, Bombardment and Rake now pick their struck cells with public
+  // randomness instead of a confidential draw (see CiphertideMechanics.
+  // pickAreaCells), so none of them take a fee anymore and all three
+  // share this same fire-then-confirm shape, only the function names,
+  // event name and call args (an anchor for Barrage and Bombardment, a
+  // row for Rake) differ.
+  async function useAreaSkillAndConfirm(
+    matchId: bigint,
+    wallet: typeof walletA,
+    label: string,
+    useFn: string,
+    useArgs: unknown[],
+    firedEvent: string,
+    confirmFn: string,
+  ): Promise<boolean> {
+    return timed(label, async () => {
+      const receipt = await write(wallet, useFn, useArgs);
+      console.log(`${useFn}() gas ${receipt.gasUsed}`);
+      const { packedHandle, allDestroyedHandle } = findEvent(receipt, firedEvent) as {
         packedHandle: Hex;
         allDestroyedHandle: Hex;
       };
-      const [packed, win] = await revealAsAttestations([packedHandle, allDestroyedHandle]);
-      const confirmReceipt = await write(wallet, "confirmBarrage", [
+      const [packed, win] = await tightPollReveal(label, [packedHandle, allDestroyedHandle]);
+      const confirmReceipt = await write(wallet, confirmFn, [
         matchId,
         packed.attestation,
         packed.signatures,
@@ -435,20 +487,37 @@ async function main() {
         win.signatures,
       ]);
       console.log(
-        `confirmBarrage gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
+        `${confirmFn} gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
           `win=${nonZero(win.attestation.value)}\n`,
       );
       return nonZero(win.attestation.value);
     });
   }
 
-  // The single 1v1 match.
-  console.log(`Creating match (Player A captain ${CAPTAIN_SHIELD}, Player B captain ${CAPTAIN_BOMBARDMENT})...`);
-  const createReceipt = await write(walletA, "createMatch", [CAPTAIN_SHIELD]);
+  const useBarrageAndConfirm = (matchId: bigint, wallet: typeof walletA) =>
+    useAreaSkillAndConfirm(matchId, wallet, "useBarrage", "useBarrage", [matchId, 0, 0], "BarrageFired", "confirmBarrage");
+  const useBombardmentAndConfirm = (matchId: bigint, wallet: typeof walletA) =>
+    useAreaSkillAndConfirm(
+      matchId,
+      wallet,
+      "useBombardment",
+      "useBombardment",
+      [matchId, 0, 0],
+      "BombardmentFired",
+      "confirmBombardment",
+    );
+  const useRakeAndConfirm = (matchId: bigint, wallet: typeof walletA) =>
+    useAreaSkillAndConfirm(matchId, wallet, "useRake", "useRake", [matchId, 0], "RakeFired", "confirmRake");
+
+  // The single 1v1 match. Player A gets captain Bombardment, Player B gets
+  // captain Rake, so both unique skills are available in this one match
+  // alongside the shared Barrage.
+  console.log(`Creating match (Player A captain ${CAPTAIN_BOMBARDMENT}, Player B captain ${CAPTAIN_RAKE})...`);
+  const createReceipt = await write(walletA, "createMatch", [CAPTAIN_BOMBARDMENT]);
   const { matchId } = findEvent(createReceipt, "MatchCreated") as { matchId: bigint };
   console.log(`Match ${matchId}, gas ${createReceipt.gasUsed}\n`);
 
-  await write(walletB, "joinMatch", [matchId, CAPTAIN_BOMBARDMENT]);
+  await write(walletB, "joinMatch", [matchId, CAPTAIN_RAKE]);
   const addr0 = (await read("getPlayerAddress", [matchId, 0])) as Hex;
   if (addr0.toLowerCase() !== accountA.address.toLowerCase()) {
     throw new Error("player index assignment did not match the assumed A=0, B=1 convention");
@@ -462,28 +531,42 @@ async function main() {
   await rollDiceUntilDecided(matchId);
 
   // A read of getTurn right after a write can land on a load balanced
-  // backend node that has not caught up with that write yet, same class
-  // of staleness worked around elsewhere in this script, and was seen for
-  // real here: a getTurn read right after the first shot's confirm still
-  // showed the actor who had just moved, so the script shot again as the
-  // same player and the contract correctly rejected it with "not your
-  // turn". A plain shot always hands the turn to the other player (only
-  // Salvo, not used in this script, can skip a turn), so once the first
-  // turn is known fresh off the dice roll, later turns are tracked
-  // locally instead of re-reading chain state that might not have caught
-  // up yet.
-  let finished = false;
-  let actorIdx = idxOf((await read("getTurn", [matchId])) as Hex);
-  finished = await doShot(matchId, actorIdx);
-  actorIdx = actorIdx === 0 ? 1 : 0;
-
-  if (!finished) {
-    finished = await doShot(matchId, actorIdx);
-    actorIdx = actorIdx === 0 ? 1 : 0;
+  // backend node that has not caught up with that write yet, the same
+  // class of staleness worked around elsewhere in this script. write()
+  // already sleeps 1.5s after every call; this adds a further pause
+  // before trusting a getTurn read used to decide the next move, since a
+  // real board now means a real mine can grant a bonus action and break a
+  // simple always-alternates assumption.
+  async function currentActorIdx(): Promise<number> {
+    await sleep(2000);
+    return idxOf((await read("getTurn", [matchId])) as Hex);
   }
 
+  let finished = false;
+  let actorIdx = await currentActorIdx();
+  finished = await doShot(matchId, actorIdx);
+
   if (!finished) {
+    actorIdx = await currentActorIdx();
     finished = await useBarrageAndConfirm(matchId, walletOf(actorIdx));
+  }
+
+  let bombardmentDone = false;
+  let rakeDone = false;
+  for (let i = 0; i < 4 && !finished && (!bombardmentDone || !rakeDone); i++) {
+    actorIdx = await currentActorIdx();
+    if (actorIdx === 0 && !bombardmentDone) {
+      finished = await useBombardmentAndConfirm(matchId, walletA);
+      bombardmentDone = true;
+    } else if (actorIdx === 1 && !rakeDone) {
+      finished = await useRakeAndConfirm(matchId, walletB);
+      rakeDone = true;
+    } else {
+      // Turn landed on the captain whose unique skill is already used
+      // (a mine bonus can do this): spend it on a plain miss so the turn
+      // passes and the loop can try the other captain's skill next.
+      finished = await doShot(matchId, actorIdx);
+    }
   }
 
   const finalPhase = (await read("getPhase", [matchId])) as number;
@@ -493,9 +576,9 @@ async function main() {
 
   await logBalances("Balances after the match");
 
-  console.log("Placement (both players, all steps), dice roll, shots and Barrage each completed their");
-  console.log("action-and-confirm cycle using only handles fetched from events and public getters, the same");
-  console.log("way a real client has to.\n");
+  console.log("Placement (both players, all steps), dice roll, a shot, Barrage, Bombardment and Rake each");
+  console.log("completed their action-and-confirm cycle using only handles fetched from events and public");
+  console.log("getters, the same way a real client has to.\n");
 
   console.log("Gas used:");
   for (const { label, gasUsed } of gasLog) console.log(`  ${label}: ${gasUsed}`);
@@ -507,6 +590,10 @@ async function main() {
     const avgMs = moveLog.reduce((sum, m) => sum + m.ms, 0) / moveLog.length;
     console.log(`  average: ${(avgMs / 1000).toFixed(1)}s over ${moveLog.length} moves`);
   }
+
+  console.log("\nTrue reveal-ready time, tight polled every 1.5s (one real attempt per poll), action tx");
+  console.log("mined to first genuine attestedReveal success, no fixed pause included:");
+  for (const { label, ms } of readyLog) console.log(`  ${label}: ${(ms / 1000).toFixed(1)}s`);
 }
 
 main().catch((err) => {

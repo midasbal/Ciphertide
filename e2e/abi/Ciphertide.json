@@ -14,32 +14,6 @@
   },
   {
     "type": "function",
-    "name": "BARRAGE_ATTEMPTS_PER_CELL",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "BARRAGE_LOCAL_POS_BITS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "BARRAGE_MAX_CELLS",
     "inputs": [],
     "outputs": [
@@ -93,32 +67,6 @@
   {
     "type": "function",
     "name": "BOMBARDMENT_AREA_SIZE",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "BOMBARDMENT_ATTEMPTS_PER_CELL",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "BOMBARDMENT_LOCAL_POS_BITS",
     "inputs": [],
     "outputs": [
       {
@@ -288,32 +236,6 @@
   {
     "type": "function",
     "name": "PLACEMENT_ATTEMPTS_PER_SHIP",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "RAKE_ATTEMPTS_PER_CELL",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint8",
-        "internalType": "uint8"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "RAKE_LOCAL_POS_BITS",
     "inputs": [],
     "outputs": [
       {
@@ -1569,7 +1491,7 @@
       }
     ],
     "outputs": [],
-    "stateMutability": "payable"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1592,7 +1514,7 @@
       }
     ],
     "outputs": [],
-    "stateMutability": "payable"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1633,7 +1555,7 @@
       }
     ],
     "outputs": [],
-    "stateMutability": "payable"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1715,6 +1637,12 @@
         "internalType": "uint8"
       },
       {
+        "name": "cells",
+        "type": "uint8[]",
+        "indexed": false,
+        "internalType": "uint8[]"
+      },
+      {
         "name": "packedHandle",
         "type": "bytes32",
         "indexed": false,
@@ -1793,6 +1721,12 @@
         "type": "uint8",
         "indexed": false,
         "internalType": "uint8"
+      },
+      {
+        "name": "cells",
+        "type": "uint8[]",
+        "indexed": false,
+        "internalType": "uint8[]"
       },
       {
         "name": "packedHandle",
@@ -2142,6 +2076,12 @@
         "type": "uint8",
         "indexed": false,
         "internalType": "uint8"
+      },
+      {
+        "name": "cells",
+        "type": "uint8[]",
+        "indexed": false,
+        "internalType": "uint8[]"
       },
       {
         "name": "packedHandle",
