@@ -14,13 +14,13 @@ const PROCESS_STEPS: Array<{
   {
     code: '01',
     title: 'Deploy',
-    body: 'Your fleet is placed and encrypted onchain through Inco. Not hidden behind a login, a private database, or an honor system. Hidden by the mathematics of the ciphertext itself.',
+    body: 'Your fleet is placed and encrypted onchain through Inco. Not hidden behind a login, a private database, or an honor system. Sealed as ciphertext only a secure enclave can open.',
     cellState: 'hidden',
   },
   {
     code: '02',
     title: 'Fire',
-    body: 'You call a coordinate. The shot is evaluated against the hidden board in encrypted form, without the board ever being decrypted in the open, by you, your opponent, or anyone watching the chain.',
+    body: 'You call a coordinate. It is checked against your hidden board inside a secure enclave, never exposed to you, your opponent, or anyone watching the chain.',
     cellState: 'decrypting',
   },
   {
@@ -123,15 +123,16 @@ export default function Landing() {
             <p className="ct-label" id="hook">
               The Brief
             </p>
-            <h2 className="landing-section-title">No board to trust. Only math to verify.</h2>
+            <h2 className="landing-section-title">No board to trust. Only a signature to check.</h2>
             <p className="landing-section-lede">
               A hidden-fleet naval duel usually runs on the honor system: you trust your opponent not to peek, or you
               trust a server to referee. Ciphertide removes both. Your fleet is encrypted onchain the instant you place it.
               No operator holds a plaintext copy. No opponent can infer your board by watching contract state. A
-              shot resolves against ciphertext, and only the outcome of that one cell is ever revealed.
+              shot is resolved inside sealed hardware, and only the outcome of that one cell is ever revealed.
             </p>
             <p className="landing-section-lede landing-section-lede--muted">
-              This is not a promise written into the rules. It is a property of the encryption. The fog of war you
+              This is not a promise written into the rules. It is enforced by sealed hardware and checked onchain
+              against a signature. The fog of war you
               see on the console is not an art direction choice, it is the literal encrypted state of your
               opponent's board, rendered honestly.
             </p>
