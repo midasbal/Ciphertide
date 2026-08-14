@@ -21,7 +21,7 @@ type ActionState = { kind: 'idle' } | { kind: 'busy'; label: string; stage: Acti
 
 type PlacementState =
   | { kind: 'checking' }
-  | { kind: 'placing'; stage: ActionStage; detail?: string; step: number }
+  | { kind: 'placing'; stage: ActionStage; detail?: string }
   | { kind: 'waiting-for-opponent' }
   | { kind: 'error'; message: string }
 
@@ -38,6 +38,18 @@ function cellStateForOutcome(outcome: CellOutcome): CipherCellState {
 
 function shortAddress(address: Address): string {
   return `${address.slice(0, 6)}...${address.slice(-4)}`
+}
+
+// Turns client.ts's raw placement progress detail ("ship step 4/6",
+// "mines and reveal step") into the human label shown while placing.
+// Reads straight from the client's own text rather than a separately
+// tracked counter, so it can never drift out of sync with what actually
+// happened on chain (see runRemainingPlacementSteps's self-correction).
+function placementStepLabel(detail: string | undefined): string {
+  if (detail === 'mines and reveal step') return 'Sealing your fleet and mines...'
+  const match = detail?.match(/^ship step (\d+)\/(\d+)$/)
+  if (match) return `Placing ship ${match[1]} of ${match[2]}...`
+  return 'Placing your fleet...'
 }
 
 function bitsToCells(mask: bigint): Set<number> {
@@ -158,10 +170,11 @@ export default function MatchScreen() {
   }, [matchIdParam])
 
   // ---------------------------------------------------------------
-  // Placement phase: run the real 7-step flow once, skip it if a
-  // reload finds this player already mid-placement or finished, see
-  // hasStartedPlacement's comment in game/client.ts for the one gap
-  // that leaves (an interruption is retried, not silently skipped).
+  // Placement phase: read the REAL on-chain placement progress first
+  // (see CiphertideClient.getPlacementProgress), so a reload mid-
+  // placement resumes at the correct next step instead of being treated
+  // as finished. Only a real PlacementConfirmed (progress.kind ===
+  // 'placed') skips straight to waiting for the opponent.
   // ---------------------------------------------------------------
 
   useEffect(() => {
@@ -172,16 +185,20 @@ export default function MatchScreen() {
 
     ;(async () => {
       try {
-        const started = await client.hasStartedPlacement(matchId, myIdx)
-        if (started) {
-          if (cancelled) return
-          setPlacementState({ kind: 'waiting-for-opponent' })
+        const progress = await client.getPlacementProgress(matchId, myIdx)
+        if (progress.kind === 'placed') {
+          if (!cancelled) setPlacementState({ kind: 'waiting-for-opponent' })
           return
         }
-        let step = 0
+        // Reveal and confirm stages report progress with no detail of
+        // their own (see client.ts's tightPollReveal call), so the last
+        // real detail (which ship, or the mines and reveal step) is
+        // carried forward rather than shown as blank while waiting on
+        // the reveal that follows it.
+        let lastDetail: string | undefined
         const onProgress = (stage: ActionStage, detail?: string) => {
-          if (stage === 'sending') step += 1
-          if (!cancelled) setPlacementState({ kind: 'placing', stage, detail, step })
+          if (detail) lastDetail = detail
+          if (!cancelled) setPlacementState({ kind: 'placing', stage, detail: lastDetail })
         }
         await client.placeBoard(matchId, onProgress)
         if (!cancelled) setPlacementState({ kind: 'waiting-for-opponent' })
@@ -715,12 +732,7 @@ function PlacementView({ state }: { state: PlacementState }) {
       </div>
     )
   }
-  const stepLabel =
-    state.stage === 'sending' || state.stage === 'mined'
-      ? `Placing ship ${Math.min(state.step, 6)} of 6...`
-      : state.step > 6
-        ? 'Sealing your fleet and mines...'
-        : `Placing ship ${state.step} of 6...`
+  const stepLabel = placementStepLabel(state.detail)
   return (
     <div className="placement-view">
       <p className="ct-label">Placing Your Fleet</p>

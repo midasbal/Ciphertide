@@ -47,6 +47,7 @@ import type {
   CellOutcome,
   DecryptedBoard,
   MatchId,
+  PlacementProgress,
   PlayerIdx,
   ProgressCallback,
   ShotOutcome,
@@ -100,6 +101,18 @@ type Wallet = WalletClient<Transport, typeof baseSepolia, Account>
 type Client = PublicClient<Transport, typeof baseSepolia>
 
 function findEvent(abi: Abi, receipt: TransactionReceipt, eventName: string) {
+  const found = findEventOrNull(abi, receipt, eventName)
+  if (!found) throw new Error(`event ${eventName} not found in receipt ${receipt.transactionHash}`)
+  return found
+}
+
+// Same as findEvent, but returns null instead of throwing when the event
+// is not present, for the placement flow's self-correcting resume, where
+// a single placeMyBoardStep receipt contains EITHER PlacementStepSubmitted
+// (still placing ships) OR PlacementSubmitted (the final mines and reveal
+// step), never both, so the caller needs to check one without treating
+// its absence as an error.
+function findEventOrNull(abi: Abi, receipt: TransactionReceipt, eventName: string) {
   for (const log of receipt.logs) {
     try {
       const decoded = decodeEventLog({ abi, eventName, data: log.data, topics: log.topics })
@@ -108,8 +121,30 @@ function findEvent(abi: Abi, receipt: TransactionReceipt, eventName: string) {
       // Not this event, keep scanning.
     }
   }
-  throw new Error(`event ${eventName} not found in receipt ${receipt.transactionHash}`)
+  return null
 }
+
+// PLACEMENT_EVENT_NAMES: the four events getPlacementProgress replays to
+// reconstruct a player's real placement state. LOG_CHUNK_BLOCKS matches
+// the tightest eth_getLogs block-range cap actually observed against this
+// project's own Base Sepolia RPC endpoint (a free-tier Alchemy key
+// refuses any range over 10 blocks), so a placement-progress scan has to
+// walk the chain backward in windows this small rather than one
+// fromBlock: 0n query. MAX_LOOKBACK_BLOCKS bounds how far back that walk
+// goes before giving up and assuming a fresh, never-started round: kept
+// small (a few minutes of Base Sepolia's ~2s blocks) because a full
+// never-started placement (no relevant event exists at all) is the most
+// common case this runs against, on every match's first entry into the
+// Placing phase, and it has to resolve quickly rather than crawl a large
+// window with nothing to find. placeBoard's own resume loop is written
+// to stay correct even if this undershoots true history (see its
+// comment), the one scenario this bound cannot self-correct is a reload
+// landing outside this window while a final placement step is still
+// pending confirmation, a narrow edge given placement's own reveal is
+// documented to take up to about a minute.
+const PLACEMENT_EVENT_NAMES = ['PlacementConfirmed', 'PlacementStepSubmitted', 'PlacementSubmitted', 'PlacementRetryNeeded'] as const
+const LOG_CHUNK_BLOCKS = 10n
+const MAX_LOOKBACK_BLOCKS = 200n
 
 // Decodes one struck cell's 3 bit result code from a skill's packed
 // reveal (0 inactive, 1 miss, 2 hit, 3 mine, 4 shield break), the same
@@ -263,17 +298,67 @@ export class CiphertideClient {
     return this.readConst('TIME_BUDGET_SECONDS')
   }
 
-  // Whether this player has already placed a board this match. There is
-  // no direct "placed" getter, so this reads the same signal
-  // placeMyBoardStep itself is gated on: the board mask handle is the
-  // placeholder zero handle until the first placement step runs, and a
-  // real (non-zero) ciphertext handle from then on, finished or not. Used
-  // to skip a redundant placement attempt after a reload once a player
-  // has already placed, not to distinguish "finished" from "mid-flight",
-  // see placeBoard's own comment for that narrower gap.
-  async hasStartedPlacement(matchId: MatchId, idx: PlayerIdx): Promise<boolean> {
-    const handle = await this.read<Hex>('getBoardMask', [matchId, idx])
-    return nonZero(handle)
+  // This player's REAL on-chain placement progress, replayed from the
+  // contract's own placement events rather than guessed from a heuristic.
+  // There is no direct "placed" or "placementShipsDone" getter, so this is
+  // the only accurate source: PlacementConfirmed only fires once
+  // confirmPlacement has actually set p.placed = true (see
+  // Ciphertide.sol), so its presence is a real, unambiguous completion
+  // signal, unlike a non-zero board-mask handle, which goes non-zero on
+  // the very FIRST placement step and stays that way whether or not
+  // placement ever finishes. Only the single most recent placement event
+  // matters (it fully determines the current state, the same as replaying
+  // the whole history would), so this walks backward from the latest
+  // block in LOG_CHUNK_BLOCKS windows (see that constant's comment for
+  // why) and stops at the first window that has one.
+  async getPlacementProgress(matchId: MatchId, idx: PlayerIdx): Promise<PlacementProgress> {
+    const player = await this.getPlayerAddress(matchId, idx)
+    const latest = await this.publicClient.getBlockNumber()
+    const floor = latest > MAX_LOOKBACK_BLOCKS ? latest - MAX_LOOKBACK_BLOCKS : 0n
+
+    let to = latest
+    for (;;) {
+      const from = to - LOG_CHUNK_BLOCKS + 1n > floor ? to - LOG_CHUNK_BLOCKS + 1n : floor
+      const rawLogs = await this.publicClient.getLogs({ address: this.address, fromBlock: from, toBlock: to })
+
+      const matches = rawLogs
+        .map((log) => {
+          try {
+            return { log, decoded: decodeEventLog({ abi: ciphertideAbi, data: log.data, topics: log.topics }) }
+          } catch {
+            return null
+          }
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => {
+          if (!entry) return false
+          const eventName = (entry.decoded.eventName ?? '') as string
+          if (!(PLACEMENT_EVENT_NAMES as readonly string[]).includes(eventName)) return false
+          const args = entry.decoded.args as unknown as { matchId?: bigint; player?: Address }
+          return args.matchId === matchId && (args.player ?? '').toLowerCase() === player.toLowerCase()
+        })
+
+      if (matches.length > 0) {
+        matches.sort((a, b) => {
+          const blockA = a.log.blockNumber ?? 0n
+          const blockB = b.log.blockNumber ?? 0n
+          if (blockA !== blockB) return blockA < blockB ? -1 : 1
+          return (a.log.logIndex ?? 0) - (b.log.logIndex ?? 0)
+        })
+        const { decoded } = matches[matches.length - 1]
+        const eventName = decoded.eventName as unknown as string
+        if (eventName === 'PlacementConfirmed') return { kind: 'placed' }
+        if (eventName === 'PlacementSubmitted') {
+          const args = decoded.args as unknown as { allPlacedHandle: Hex }
+          return { kind: 'pending', allPlacedHandle: args.allPlacedHandle }
+        }
+        if (eventName === 'PlacementRetryNeeded') return { kind: 'in-progress', shipsDone: 0 }
+        const args = decoded.args as unknown as { shipsDone: number }
+        return { kind: 'in-progress', shipsDone: Number(args.shipsDone) }
+      }
+
+      if (from <= floor) return { kind: 'in-progress', shipsDone: 0 }
+      to = from - 1n
+    }
   }
 
   // The next match id the contract will hand out. Since match ids are
@@ -357,43 +442,93 @@ export class CiphertideClient {
     await this.write('joinMatch', [matchId, captainId])
   }
 
+  // Sends placeMyBoardStep calls starting from startShipsDone until the
+  // final mines-and-reveal step lands, returning its allPlacedHandle.
+  // Self-correcting by design: each receipt is checked for WHICH event it
+  // actually contains (PlacementStepSubmitted vs PlacementSubmitted)
+  // rather than trusting a fixed call count derived from startShipsDone,
+  // so if getPlacementProgress's bounded lookback undershot the real
+  // history (see its own comment on MAX_LOOKBACK_BLOCKS) and
+  // startShipsDone is lower than the true on-chain value, this still
+  // converges on exactly the right number of calls: the contract always
+  // advances from its own real stored progress regardless of what this
+  // client believes, and the receipt says which step actually happened.
+  private async runRemainingPlacementSteps(
+    matchId: MatchId,
+    startShipsDone: number,
+    numShips: number,
+    placementAttemptsPerShip: bigint,
+    minesPerPlayer: bigint,
+    minePlacementAttempts: bigint,
+    onProgress?: ProgressCallback,
+  ): Promise<Hex> {
+    let shipsDone = startShipsDone
+    for (;;) {
+      const isMineStep = shipsDone >= numShips
+      onProgress?.('sending', isMineStep ? 'mines and reveal step' : `ship step ${shipsDone + 1}/${numShips}`)
+      const fee = isMineStep
+        ? (await this.getFee()) * minesPerPlayer * minePlacementAttempts
+        : (await this.getFee()) * placementAttemptsPerShip
+      const receipt = await this.write('placeMyBoardStep', [matchId], fee)
+
+      const submitted = findEventOrNull(ciphertideAbi, receipt, 'PlacementSubmitted') as { allPlacedHandle: Hex } | null
+      if (submitted) {
+        onProgress?.('mined', 'mines and reveal step')
+        return submitted.allPlacedHandle
+      }
+      const step = findEvent(ciphertideAbi, receipt, 'PlacementStepSubmitted') as { shipsDone: number }
+      shipsDone = Number(step.shipsDone)
+      onProgress?.('mined', `ship step ${shipsDone}/${numShips}`)
+    }
+  }
+
   // ---------------------------------------------------------------
   // Placement: NUM_SHIPS ship steps, then a final mines and reveal step,
   // confirmed once the allPlaced bit is ready. Ported from e2e/run.ts's
-  // placeAndConfirm.
+  // placeAndConfirm, then extended to resume from the real on-chain
+  // progress (see getPlacementProgress) instead of always running a full
+  // NUM_SHIPS + 1 call sequence from ship 0.
   //
-  // Resuming after a reload mid-placement: each placeMyBoardStep call
-  // asks the contract to place whichever ship (or the mines) its own
-  // stored progress says comes next, it does not trust a step number
-  // from the caller, so calling this again after an interruption
-  // resumes correctly on its own. The one call that does NOT resume, and
-  // reverts instead, is calling this again once the player has already
-  // fully placed (the contract's own placed flag, see
-  // hasStartedPlacement's comment for why that specific finished-or-not
-  // distinction is not read ahead of time here).
+  // Resuming after a reload mid-placement: the contract does NOT tolerate
+  // calling placeMyBoardStep too many times: it reverts once placed is
+  // true ("already placed") and also while the final step's reveal is
+  // still pending confirmation ("placement already submitted, awaiting
+  // confirmation"), so this reads the real progress first, skips calling
+  // it at all in either of those two states, and otherwise resumes the
+  // ship-placing loop from the real shipsDone (see
+  // runRemainingPlacementSteps for why that resume is safe even if the
+  // read undershoots).
   // ---------------------------------------------------------------
 
   async placeBoard(matchId: MatchId, onProgress?: ProgressCallback): Promise<{ allPlaced: boolean }> {
     const idx = await this.getMyPlayerIndex(matchId)
-    const NUM_SHIPS = await this.readConst('NUM_SHIPS')
+    const NUM_SHIPS = Number(await this.readConst('NUM_SHIPS'))
     const PLACEMENT_ATTEMPTS_PER_SHIP = await this.readConst('PLACEMENT_ATTEMPTS_PER_SHIP')
     const MINES_PER_PLAYER = await this.readConst('MINES_PER_PLAYER')
     const MINE_PLACEMENT_ATTEMPTS = await this.readConst('MINE_PLACEMENT_ATTEMPTS')
 
     for (let attempt = 0; attempt < 3; attempt++) {
-      for (let step = 1n; step <= NUM_SHIPS; step++) {
-        onProgress?.('sending', `ship step ${step}/${NUM_SHIPS}`)
-        const shipFee = (await this.getFee()) * PLACEMENT_ATTEMPTS_PER_SHIP
-        await this.write('placeMyBoardStep', [matchId], shipFee)
-        onProgress?.('mined', `ship step ${step}/${NUM_SHIPS}`)
-      }
+      const progress = await this.getPlacementProgress(matchId, idx)
+      if (progress.kind === 'placed') return { allPlaced: true }
 
-      onProgress?.('sending', 'mines and reveal step')
-      const mineFee = (await this.getFee()) * MINES_PER_PLAYER * MINE_PLACEMENT_ATTEMPTS
-      const receipt = await this.write('placeMyBoardStep', [matchId], mineFee)
-      onProgress?.('mined', 'mines and reveal step')
+      // The final step already landed on a previous attempt (a reload
+      // interrupted the reveal/confirm dance right after it); resume
+      // straight from the reveal using the handle PlacementSubmitted
+      // already carries, calling placeMyBoardStep again here would
+      // revert.
+      const allPlacedHandle =
+        progress.kind === 'pending'
+          ? progress.allPlacedHandle
+          : await this.runRemainingPlacementSteps(
+              matchId,
+              progress.shipsDone,
+              NUM_SHIPS,
+              PLACEMENT_ATTEMPTS_PER_SHIP,
+              MINES_PER_PLAYER,
+              MINE_PLACEMENT_ATTEMPTS,
+              onProgress,
+            )
 
-      const { allPlacedHandle } = findEvent(ciphertideAbi, receipt, 'PlacementSubmitted') as { allPlacedHandle: Hex }
       const [{ attestation, signatures }] = await this.tightPollReveal([allPlacedHandle], onProgress)
 
       onProgress?.('confirming')
@@ -403,8 +538,9 @@ export class CiphertideClient {
       const allPlaced = nonZero(attestation.value)
       if (allPlaced) return { allPlaced: true }
       // The contract has already reset its own step counter back to the
-      // first ship on a false allPlaced, so retrying just means running
-      // the same NUM_SHIPS + 1 calls again from the start.
+      // first ship on a false allPlaced (see confirmPlacement), so the
+      // next getPlacementProgress call at the top of this loop will see
+      // shipsDone back at 0 and this attempt runs a fresh full round.
     }
     return { allPlaced: false }
   }

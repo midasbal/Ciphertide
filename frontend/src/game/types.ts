@@ -60,6 +60,19 @@ export type DecryptedBoard = {
   mineMask: bigint
 }
 
+// A player's real on-chain placement progress, replayed from the
+// contract's own placement events (see CiphertideClient.getPlacementProgress).
+// 'placed' means PlacementConfirmed has fired, the only real completion
+// signal. 'pending' means the final mines-and-reveal step already landed
+// on chain and is waiting on its reveal and confirmPlacement, calling
+// placeMyBoardStep again in this state reverts. 'in-progress' means some
+// number of ship steps (0 up to NUM_SHIPS - 1) have landed and placement
+// should resume from shipsDone, not restart from ship 0.
+export type PlacementProgress =
+  | { kind: 'placed' }
+  | { kind: 'pending'; allPlacedHandle: Hex }
+  | { kind: 'in-progress'; shipsDone: number }
+
 export type PlayerAddresses = {
   playerA: Address
   playerB: Address
