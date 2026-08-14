@@ -38,58 +38,52 @@ contract Ciphertide {
 
     /// Bounded-attempt random placement: per ship, this many independent
     /// random candidate slots are tried, the first non-overlapping one
-    /// wins. Tunable up if the failure rate needs to shrink further, down
-    /// if gas is too high.
-    uint8 public constant PLACEMENT_ATTEMPTS_PER_SHIP = 20;
+    /// wins. Every confidential randBounded draw costs roughly one second
+    /// of real Inco reveal wait once an action lands, so this is set to the
+    /// smallest value an empirical sweep found keeps a full placement
+    /// almost always succeeding: 0 failures in 150 independent rounds
+    /// (CiphertideMechanics.placeOneShip called directly, bypassing the
+    /// match state machine, see PlacementTest for the shipped regression
+    /// check). The board is only about 10% full even at the last, biggest
+    /// ship, so 20 was far more headroom than the real collision rate
+    /// needs. Tunable up if the failure rate ever needs to shrink further,
+    /// down if gas is too high.
+    uint8 public constant PLACEMENT_ATTEMPTS_PER_SHIP = 10;
 
     /// Two mines per player, placed on water cells only. Fewer attempts
     /// than ship placement since a mine only has to avoid the ship cells
     /// (about 10% of the board) and at most one other mine, a much lower
-    /// collision rate than packing a whole fleet.
+    /// collision rate than packing a whole fleet. Same empirical approach
+    /// as PLACEMENT_ATTEMPTS_PER_SHIP: 0 failures in 200 independent
+    /// rounds at this value.
     uint8 public constant MINES_PER_PLAYER = 2;
-    uint8 public constant MINE_PLACEMENT_ATTEMPTS = 10;
+    uint8 public constant MINE_PLACEMENT_ATTEMPTS = 5;
 
     /// Sonar: one 5x5 area, whole board query, single use per match.
     uint8 public constant SONAR_AREA_SIZE = 5;
 
     /// Barrage: one 4x4 area, a random 4 to 6 of its 16 cells are struck.
-    /// The first BARRAGE_MIN_CELLS slots are always struck (count is at
-    /// least that many), the remaining slots are conditionally struck
-    /// depending on the random count. Each slot draws BARRAGE_ATTEMPTS_PER_CELL
-    /// independent candidates to land on a cell distinct from every other
-    /// slot and from cells already shot, few attempts suffice since the
-    /// area only has 16 cells and at most 5 are already excluded. A 4x4
-    /// area has 16 cells, addressed by exactly 4 bits, see
-    /// CiphertideMechanics.resolveAreaStrikes for the packed encoding this
-    /// feeds.
+    /// Which cells get struck is public information the instant a barrage
+    /// resolves, so the cells are chosen with plain public randomness (see
+    /// _publicStrikeSeed and CiphertideMechanics.pickAreaCells), not a
+    /// confidential draw: only the per-cell hit or miss result stays
+    /// confidential until reveal. A 4x4 area has 16 cells.
     uint8 public constant BARRAGE_AREA_SIZE = 4;
     uint8 public constant BARRAGE_MIN_CELLS = 4;
     uint8 public constant BARRAGE_MAX_CELLS = 6;
-    uint8 public constant BARRAGE_ATTEMPTS_PER_CELL = 8;
-    uint8 public constant BARRAGE_LOCAL_POS_BITS = 4;
 
     /// Bombardment: Captain 2's unique skill, one 10x10 area, a fixed 15 of
-    /// its 100 cells are struck. Unlike Barrage's randomized 4 to 6, the
-    /// count never varies, so it shares the same bounded-attempt drawing
-    /// and packing machinery with minCells simply equal to maxCells. A
-    /// 10x10 area has 100 cells, needing 7 bits (up to 127) to address a
-    /// local position, one bit wider than Barrage's 4 bits.
+    /// its 100 cells are struck. Same public cell choice as Barrage, just a
+    /// fixed count instead of a randomized 4 to 6.
     uint8 public constant BOMBARDMENT_AREA_SIZE = 10;
     uint8 public constant BOMBARDMENT_STRIKE_COUNT = 15;
-    uint8 public constant BOMBARDMENT_ATTEMPTS_PER_CELL = 8;
-    uint8 public constant BOMBARDMENT_LOCAL_POS_BITS = 7;
 
     /// Rake: Captain 3's unique skill, one whole row (BOARD_SIZE cells wide,
-    /// a single cell tall), a fixed 3 of its 15 cells are struck. Shares
-    /// the same bounded-attempt drawing and packing machinery as Barrage
-    /// and Bombardment, with minCells equal to maxCells like Bombardment,
-    /// just over a 15x1 area instead of a square. A row has 15 cells,
-    /// needing 4 bits (up to 15) to address a local position, same width
-    /// as Barrage's.
+    /// a single cell tall), a fixed 3 of its 15 cells are struck. Same
+    /// public cell choice as Barrage and Bombardment, just over a 15x1 area
+    /// instead of a square.
     uint8 public constant RAKE_ROW_LENGTH = 15;
     uint8 public constant RAKE_STRIKE_COUNT = 3;
-    uint8 public constant RAKE_ATTEMPTS_PER_CELL = 8;
-    uint8 public constant RAKE_LOCAL_POS_BITS = 4;
 
     /// Salvo: Captain 4's unique skill, 3 caller chosen specific cells,
     /// struck at once. Unlike Barrage, Bombardment and Rake, the cells are
@@ -171,6 +165,19 @@ contract Ciphertide {
         uint8 pendingAreaAnchorRow; // barrage, bombardment, rake, carpet only
         uint8 pendingAreaAnchorCol; // barrage, bombardment, rake, carpet only
         uint8[3] pendingSalvoCells; // salvo only
+        // The cells a public random strike picked (barrage, bombardment,
+        // rake only), in the same order their packed result codes are
+        // bit-packed, set at fire time and read back at confirm time. Sized
+        // to Bombardment's fixed 15, the largest of the three; Barrage uses
+        // its first 4 to 6 slots and Rake its first 3, per
+        // pendingAreaCellCount.
+        uint8[15] pendingAreaCells;
+        uint8 pendingAreaCellCount;
+        // Mixed into the public seed a barrage, bombardment or rake draws
+        // its struck cells from (see _publicStrikeSeed), incremented every
+        // time, so the same block cannot produce the same seed twice for
+        // this match.
+        uint32 randNonce;
     }
 
     mapping(uint256 => Match) internal matches;
@@ -204,6 +211,7 @@ contract Ciphertide {
         address indexed player,
         uint8 anchorRow,
         uint8 anchorCol,
+        uint8[] cells,
         bytes32 packedHandle,
         bytes32 allDestroyedHandle
     );
@@ -213,12 +221,18 @@ contract Ciphertide {
         address indexed player,
         uint8 anchorRow,
         uint8 anchorCol,
+        uint8[] cells,
         bytes32 packedHandle,
         bytes32 allDestroyedHandle
     );
     event BombardmentResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
     event RakeFired(
-        uint256 indexed matchId, address indexed player, uint8 row, bytes32 packedHandle, bytes32 allDestroyedHandle
+        uint256 indexed matchId,
+        address indexed player,
+        uint8 row,
+        uint8[] cells,
+        bytes32 packedHandle,
+        bytes32 allDestroyedHandle
     );
     event RakeResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
     event SalvoFired(
@@ -586,13 +600,42 @@ contract Ciphertide {
         emit GameStarted(matchId, m.players[m.turn].addr);
     }
 
-    /// @dev Shared fee check for every action that spends random draws
-    ///      (placement, dice, shield, barrage, bombardment, rake): draws is
-    ///      the number of randBounded/rand calls the action is about to
-    ///      make, each costing inco.getFee(). Sonar and Salvo make no
-    ///      random draws and so never call this.
+    /// @dev Shared fee check for every action that spends confidential
+    ///      random draws (placement, dice, shield): draws is the number of
+    ///      randBounded/rand calls the action is about to make, each
+    ///      costing inco.getFee(). Sonar, Salvo, Carpet, Barrage,
+    ///      Bombardment and Rake make no confidential random draws (the
+    ///      last three pick their struck cells with plain public
+    ///      randomness instead, see _publicStrikeSeed) and so never call
+    ///      this.
     function _requireFee(uint256 draws) internal view {
         require(msg.value >= inco.getFee() * draws, "fee not paid");
+    }
+
+    /// @dev Derives the public seed a barrage, bombardment or rake draws its
+    ///      struck cells from. Which cells get struck becomes public the
+    ///      instant the strike resolves anyway, so this only needs to be
+    ///      unpredictable to the caller at the moment they send the
+    ///      transaction, not confidential afterward: block.prevrandao is
+    ///      not known until the block is built and the caller cannot choose
+    ///      it, matchId and msg.sender spread the seed across matches and
+    ///      players, and the per-match nonce stops the same seed repeating
+    ///      if the same player fires another such skill in the same match
+    ///      later. Good enough for a game skill's random cell choice on
+    ///      testnet; a commit-reveal seed would be worth adding later to
+    ///      harden this against a sequencer's influence over
+    ///      block.prevrandao.
+    function _publicStrikeSeed(Match storage m, uint256 matchId) internal returns (uint256) {
+        return uint256(keccak256(abi.encode(block.prevrandao, matchId, msg.sender, m.randNonce++)));
+    }
+
+    /// @dev Copies a freshly picked cell list into the match's pending area
+    ///      cell storage, shared by barrage, bombardment and rake.
+    function _storePendingAreaCells(Match storage m, uint8[] memory cells) internal {
+        m.pendingAreaCellCount = uint8(cells.length);
+        for (uint8 k = 0; k < cells.length; k++) {
+            m.pendingAreaCells[k] = cells[k];
+        }
     }
 
     /// @dev Shared preamble for any player action (shoot, sonar, barrage):
@@ -981,15 +1024,17 @@ contract Ciphertide {
     ///         survives, and the shield is consumed. Consumes the match's
     ///         single barrage charge and is the player's whole action for
     ///         the turn.
-    /// @dev The count and the six candidate cells are picked with the same
-    ///      bounded-attempt, first-non-overlapping-candidate pattern as
-    ///      ship placement, entirely on encrypted values, via the shared
-    ///      CiphertideMechanics.resolveAreaStrikes (also used by
-    ///      Bombardment below). The only reveals are one packed value (six
-    ///      7 bit slots: 4 bit local position plus a 3 bit result code, 0
-    ///      inactive, 1 miss, 2 hit, 3 mine, 4 shield break), the newly
-    ///      sunk ship mask, and the win bit.
-    function useBarrage(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external payable onlyPlayer(matchId) {
+    /// @dev The struck count and cells are picked with plain public
+    ///      randomness (CiphertideMechanics.pickAreaCells), not a
+    ///      confidential draw: which cells get struck is public information
+    ///      the instant a barrage resolves anyway, so drawing them
+    ///      confidentially bought no privacy, only reveal latency. Only the
+    ///      per-cell hit or miss result (CiphertideMechanics.
+    ///      resolveChosenAreaStrikes) stays confidential until reveal: one
+    ///      packed value, 3 bits per struck cell (0 inactive, 1 miss, 2
+    ///      hit, 3 mine, 4 shield break), the newly sunk ship mask, and the
+    ///      win bit.
+    function useBarrage(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         _beginAction(m);
         require(
@@ -1002,31 +1047,31 @@ contract Ciphertide {
         require(!attacker.barrageUsed, "barrage already used");
         attacker.barrageUsed = true;
 
-        uint256 totalDraws = uint256(1) + uint256(BARRAGE_MAX_CELLS) * BARRAGE_ATTEMPTS_PER_CELL;
-        _requireFee(totalDraws);
-
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
-            m,
-            defender,
+        uint8[] memory cells = CiphertideMechanics.pickAreaCells(
+            _publicStrikeSeed(m, matchId),
             CiphertideMechanics.AreaGeometry({
                 anchorRow: anchorRow,
                 anchorCol: anchorCol,
                 width: BARRAGE_AREA_SIZE,
                 height: BARRAGE_AREA_SIZE
             }),
-            CiphertideMechanics.StrikeConfig({
-                minCells: BARRAGE_MIN_CELLS,
-                maxCells: BARRAGE_MAX_CELLS,
-                attemptsPerCell: BARRAGE_ATTEMPTS_PER_CELL,
-                positionBits: BARRAGE_LOCAL_POS_BITS
-            })
+            BARRAGE_MIN_CELLS,
+            BARRAGE_MAX_CELLS,
+            defender.shotsAgainstMe
         );
+
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
+            CiphertideMechanics.resolveChosenAreaStrikes(cells, defender);
+        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
+        m.pendingAreaAnchorRow = anchorRow;
+        m.pendingAreaAnchorCol = anchorCol;
+        _storePendingAreaCells(m, cells);
 
         m.pendingAction = PendingAction.Barrage;
 
         emit BarrageFired(
-            matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
+            matchId, msg.sender, anchorRow, anchorCol, cells, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
         );
     }
 
@@ -1039,14 +1084,10 @@ contract Ciphertide {
     ///         as a shield break instead (no damage, the cell survives,
     ///         the shield is consumed). Single use per match, and the
     ///         player's whole action for the turn.
-    /// @dev Shares CiphertideMechanics.resolveAreaStrikes with Barrage,
-    ///      just over a larger area and a fixed strike count (minCells ==
-    ///      maxCells == BOMBARDMENT_STRIKE_COUNT) instead of a randomized
-    ///      range, so every one of the 15 slots is always active. The
-    ///      packed reveal uses BOMBARDMENT_LOCAL_POS_BITS (7) bits per
-    ///      local position instead of Barrage's 4, ten bits per slot, see
-    ///      resolveAreaStrikes for the full encoding.
-    function useBombardment(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external payable onlyPlayer(matchId) {
+    /// @dev Same public cell choice and resolution path as Barrage, just a
+    ///      fixed count (minCells == maxCells == BOMBARDMENT_STRIKE_COUNT)
+    ///      over a larger area, so all 15 slots are always active.
+    function useBombardment(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         _beginAction(m);
         _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_BOMBARDMENT);
@@ -1060,31 +1101,31 @@ contract Ciphertide {
         require(!attacker.bombardmentUsed, "bombardment already used");
         attacker.bombardmentUsed = true;
 
-        uint256 totalDraws = uint256(1) + uint256(BOMBARDMENT_STRIKE_COUNT) * BOMBARDMENT_ATTEMPTS_PER_CELL;
-        _requireFee(totalDraws);
-
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
-            m,
-            defender,
+        uint8[] memory cells = CiphertideMechanics.pickAreaCells(
+            _publicStrikeSeed(m, matchId),
             CiphertideMechanics.AreaGeometry({
                 anchorRow: anchorRow,
                 anchorCol: anchorCol,
                 width: BOMBARDMENT_AREA_SIZE,
                 height: BOMBARDMENT_AREA_SIZE
             }),
-            CiphertideMechanics.StrikeConfig({
-                minCells: BOMBARDMENT_STRIKE_COUNT,
-                maxCells: BOMBARDMENT_STRIKE_COUNT,
-                attemptsPerCell: BOMBARDMENT_ATTEMPTS_PER_CELL,
-                positionBits: BOMBARDMENT_LOCAL_POS_BITS
-            })
+            BOMBARDMENT_STRIKE_COUNT,
+            BOMBARDMENT_STRIKE_COUNT,
+            defender.shotsAgainstMe
         );
+
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
+            CiphertideMechanics.resolveChosenAreaStrikes(cells, defender);
+        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
+        m.pendingAreaAnchorRow = anchorRow;
+        m.pendingAreaAnchorCol = anchorCol;
+        _storePendingAreaCells(m, cells);
 
         m.pendingAction = PendingAction.Bombardment;
 
         emit BombardmentFired(
-            matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
+            matchId, msg.sender, anchorRow, anchorCol, cells, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
         );
     }
 
@@ -1097,13 +1138,11 @@ contract Ciphertide {
     ///         shield break instead (no damage, the cell survives, the
     ///         shield is consumed). Single use per match, and the player's
     ///         whole action for the turn.
-    /// @dev Shares CiphertideMechanics.resolveAreaStrikes with Barrage and
+    /// @dev Same public cell choice and resolution path as Barrage and
     ///      Bombardment, over a RAKE_ROW_LENGTH x 1 area (the whole chosen
-    ///      row) with a fixed strike count (minCells == maxCells ==
+    ///      row) with a fixed count (minCells == maxCells ==
     ///      RAKE_STRIKE_COUNT), so all 3 slots are always active.
-    ///      RAKE_LOCAL_POS_BITS (4) bits per local position, 7 bits per
-    ///      slot, see resolveAreaStrikes for the full encoding.
-    function useRake(uint256 matchId, uint8 row) external payable onlyPlayer(matchId) {
+    function useRake(uint256 matchId, uint8 row) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         _beginAction(m);
         _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_RAKE);
@@ -1113,25 +1152,25 @@ contract Ciphertide {
         require(!attacker.rakeUsed, "rake already used");
         attacker.rakeUsed = true;
 
-        uint256 totalDraws = uint256(1) + uint256(RAKE_STRIKE_COUNT) * RAKE_ATTEMPTS_PER_CELL;
-        _requireFee(totalDraws);
-
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
-            m,
-            defender,
+        uint8[] memory cells = CiphertideMechanics.pickAreaCells(
+            _publicStrikeSeed(m, matchId),
             CiphertideMechanics.AreaGeometry({anchorRow: row, anchorCol: 0, width: RAKE_ROW_LENGTH, height: 1}),
-            CiphertideMechanics.StrikeConfig({
-                minCells: RAKE_STRIKE_COUNT,
-                maxCells: RAKE_STRIKE_COUNT,
-                attemptsPerCell: RAKE_ATTEMPTS_PER_CELL,
-                positionBits: RAKE_LOCAL_POS_BITS
-            })
+            RAKE_STRIKE_COUNT,
+            RAKE_STRIKE_COUNT,
+            defender.shotsAgainstMe
         );
+
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
+            CiphertideMechanics.resolveChosenAreaStrikes(cells, defender);
+        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
+        m.pendingAreaAnchorRow = row;
+        m.pendingAreaAnchorCol = 0;
+        _storePendingAreaCells(m, cells);
 
         m.pendingAction = PendingAction.Rake;
 
-        emit RakeFired(matchId, msg.sender, row, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
+        emit RakeFired(matchId, msg.sender, row, cells, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
     }
 
     /// @dev Shared reveal-and-stash tail for every multi-cell strike skill
@@ -1162,51 +1201,23 @@ contract Ciphertide {
         m.pendingAreaAllDestroyed = allDestroyed;
     }
 
-    /// @dev Shared firing step for every area-strike skill (Barrage,
-    ///      Bombardment, Rake): calls CiphertideMechanics.resolveAreaStrikes,
-    ///      then _finalizeAreaPending, and stashes the aimed area's anchor.
-    ///      Each caller still sets its own m.pendingAction and emits its
-    ///      own Fired event afterward, since those differ per skill.
-    function _fireAreaStrike(
-        Match storage m,
-        PlayerSlot storage defender,
-        CiphertideMechanics.AreaGeometry memory area,
-        CiphertideMechanics.StrikeConfig memory config
-    ) internal returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) {
-        (packed, newlyDestroyed, allDestroyed) = CiphertideMechanics.resolveAreaStrikes(area, defender, config);
-        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
-        m.pendingAreaAnchorRow = area.anchorRow;
-        m.pendingAreaAnchorCol = area.anchorCol;
-    }
-
     /// @dev Decodes an area strike's packed slots (shared by Barrage,
     ///      Bombardment and Rake, actionKind picks which Resolved event to
-    ///      emit), marks every active slot's cell as shot except a shield
-    ///      break, and emits per-cell results. Returns whether any struck
-    ///      cell was a mine, pulled into its own function to keep
-    ///      confirmBarrage, confirmBombardment and confirmRake's own stack
-    ///      frames small.
-    function _applyAreaResults(
-        uint256 matchId,
-        PlayerSlot storage defender,
-        uint256 packed,
-        uint8 anchorRow,
-        uint8 anchorCol,
-        uint8 width,
-        uint8 maxCells,
-        uint8 positionBits,
-        PendingAction actionKind
-    ) internal returns (bool anyMineTriggered) {
-        uint256 slotBits = uint256(positionBits) + 3;
-        uint256 slotMask = (uint256(1) << slotBits) - 1;
-        uint256 posMask = (uint256(1) << positionBits) - 1;
-        for (uint8 k = 0; k < maxCells; k++) {
-            uint256 slotValue = (packed >> (uint256(k) * slotBits)) & slotMask;
-            uint256 code = slotValue >> positionBits;
-            if (code == 0) continue;
-
-            uint256 localPos = slotValue & posMask;
-            uint8 globalCell = uint8((localPos / width + anchorRow) * BOARD_SIZE + (localPos % width + anchorCol));
+    ///      emit): one 3 bit result code per cell in m.pendingAreaCells, no
+    ///      local position to decode since those cells were already public
+    ///      the moment the strike fired and are read straight from storage.
+    ///      Marks every active slot's cell as shot except a shield break,
+    ///      and emits per-cell results. Returns whether any struck cell was
+    ///      a mine, pulled into its own function to keep confirmBarrage,
+    ///      confirmBombardment and confirmRake's own stack frames small.
+    function _applyAreaResults(uint256 matchId, Match storage m, PlayerSlot storage defender, uint256 packed, PendingAction actionKind)
+        internal
+        returns (bool anyMineTriggered)
+    {
+        uint8 count = m.pendingAreaCellCount;
+        for (uint8 k = 0; k < count; k++) {
+            uint256 code = (packed >> (uint256(k) * 3)) & 0x7;
+            uint8 globalCell = m.pendingAreaCells[k];
             // Every resolved cell is logged into shotsAgainstMe, exactly as
             // before the shield rework, with one exception: a shield break
             // (code 4) is not logged, so that cell can be struck again once
@@ -1291,10 +1302,7 @@ contract Ciphertide {
         bytes[] memory allDestroyedSignatures,
         string memory noPendingMessage,
         string memory invalidPackedMessage,
-        string memory packedMismatchMessage,
-        uint8 width,
-        uint8 maxCells,
-        uint8 positionBits
+        string memory packedMismatchMessage
     ) internal {
         Match storage m = matches[matchId];
         require(m.pendingAction == expectedAction, noPendingMessage);
@@ -1319,17 +1327,7 @@ contract Ciphertide {
 
         uint8 actorIdx = m.pendingActor;
         PlayerSlot storage defender = m.players[1 - actorIdx];
-        bool anyMineTriggered = _applyAreaResults(
-            matchId,
-            defender,
-            packedValue,
-            m.pendingAreaAnchorRow,
-            m.pendingAreaAnchorCol,
-            width,
-            maxCells,
-            positionBits,
-            expectedAction
-        );
+        bool anyMineTriggered = _applyAreaResults(matchId, m, defender, packedValue, expectedAction);
 
         _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
@@ -1350,10 +1348,7 @@ contract Ciphertide {
             allDestroyedSignatures,
             "no pending barrage",
             "invalid barrage attestation",
-            "barrage handle mismatch",
-            BARRAGE_AREA_SIZE,
-            BARRAGE_MAX_CELLS,
-            BARRAGE_LOCAL_POS_BITS
+            "barrage handle mismatch"
         );
     }
 
@@ -1383,10 +1378,7 @@ contract Ciphertide {
             allDestroyedSignatures,
             "no pending bombardment",
             "invalid bombardment attestation",
-            "bombardment handle mismatch",
-            BOMBARDMENT_AREA_SIZE,
-            BOMBARDMENT_STRIKE_COUNT,
-            BOMBARDMENT_LOCAL_POS_BITS
+            "bombardment handle mismatch"
         );
     }
 
@@ -1417,10 +1409,7 @@ contract Ciphertide {
             allDestroyedSignatures,
             "no pending rake",
             "invalid rake attestation",
-            "rake handle mismatch",
-            RAKE_ROW_LENGTH,
-            RAKE_STRIKE_COUNT,
-            RAKE_LOCAL_POS_BITS
+            "rake handle mismatch"
         );
     }
 

@@ -7,6 +7,7 @@ import {DecryptionAttestation} from "@inco/lightning/src/lightning-parts/Decrypt
 import {console} from "forge-std/console.sol";
 import {Ciphertide} from "../Ciphertide.sol";
 import {CiphertideHarness} from "./CiphertideHarness.sol";
+import {CiphertideMechanics} from "../CiphertideMechanics.sol";
 
 /// @notice Tests for the core loop: match creation and join, dice roll,
 ///         shot resolution, turn handling and win detection. Board state is
@@ -210,20 +211,16 @@ contract CiphertideTest is IncoTest {
         code = (packedValue >> (uint256(slotIndex) * 3)) & 0x7;
     }
 
-    /// @dev Decodes one area-strike slot (positionBits bits of local
-    /// position, 3 bit result code: 0 inactive, 1 miss, 2 ship hit, 3 mine,
-    /// 4 shield break) from a packed value, mirroring the contract's own
-    /// packing in CiphertideMechanics.resolveAreaStrikes. Barrage uses 4
-    /// position bits (7 bits per slot), Bombardment uses 7 (10 bits per
-    /// slot).
-    function _decodeAreaSlot(uint256 packedValue, uint8 slotIndex, uint8 positionBits)
-        internal
-        pure
-        returns (uint256 code)
-    {
-        uint256 slotBits = uint256(positionBits) + 3;
-        uint256 slotValue = (packedValue >> (uint256(slotIndex) * slotBits)) & ((uint256(1) << slotBits) - 1);
-        code = slotValue >> positionBits;
+    /// @dev Decodes one area-strike slot (3 bit result code only, no local
+    /// position: barrage, bombardment and rake pick their cells with public
+    /// randomness before firing and store them directly, so there is
+    /// nothing to decode a position out of), mirroring
+    /// CiphertideMechanics.resolveChosenAreaStrikes. Barrage, Bombardment
+    /// and Rake all share this same packing now, identical in shape to
+    /// _decodeSalvoSlot, just over a variable slot count instead of a fixed
+    /// 3. cellsOf(matchId) gives the cell each slot k refers to.
+    function _decodeAreaSlot(uint256 packedValue, uint8 slotIndex) internal pure returns (uint256 code) {
+        code = (packedValue >> (uint256(slotIndex) * 3)) & 0x7;
     }
 
     /// @dev Fetches the attestation for one of a pending shot's four handles
@@ -440,13 +437,12 @@ contract CiphertideTest is IncoTest {
         address user = game.getTurn(matchId);
 
         vm.deal(user, 1 ether);
-        uint256 fee = _barrageFee();
         vm.prank(user);
         uint256 gasBefore = gasleft();
-        game.useBarrage{value: fee}(matchId, 0, 0);
+        game.useBarrage(matchId, 0, 0);
         uint256 gasUsed = gasBefore - gasleft();
 
-        console.log("useBarrage() gas used (6 slots x 8 attempts + 1 count draw):", gasUsed);
+        console.log("useBarrage() gas used (0 confidential draws, public cell pick):", gasUsed);
     }
 
     function testBombardmentGasUsage() public {
@@ -457,13 +453,12 @@ contract CiphertideTest is IncoTest {
         }
 
         vm.deal(bob, 1 ether);
-        uint256 fee = _bombardmentFee();
         vm.prank(bob);
         uint256 gasBefore = gasleft();
-        game.useBombardment{value: fee}(matchId, 0, 0);
+        game.useBombardment(matchId, 0, 0);
         uint256 gasUsed = gasBefore - gasleft();
 
-        console.log("useBombardment() gas used (15 slots x 8 attempts + 1 count draw):", gasUsed);
+        console.log("useBombardment() gas used (0 confidential draws, public cell pick):", gasUsed);
     }
 
     function testRakeGasUsage() public {
@@ -476,13 +471,12 @@ contract CiphertideTest is IncoTest {
         }
 
         vm.deal(alice, 1 ether);
-        uint256 fee = _rakeFee();
         vm.prank(alice);
         uint256 gasBefore = gasleft();
-        game.useRake{value: fee}(matchId, 0);
+        game.useRake(matchId, 0);
         uint256 gasUsed = gasBefore - gasleft();
 
-        console.log("useRake() gas used (3 slots x 8 attempts + 1 count draw):", gasUsed);
+        console.log("useRake() gas used (0 confidential draws, public cell pick):", gasUsed);
     }
 
     function testKnownMissPassesTurn() public {
@@ -712,40 +706,104 @@ contract CiphertideTest is IncoTest {
         game.useSonar(matchId, 0, 0);
     }
 
-    function _barrageFee() internal view returns (uint256) {
-        uint256 draws = uint256(1) + uint256(game.BARRAGE_MAX_CELLS()) * game.BARRAGE_ATTEMPTS_PER_CELL();
-        return inco.getFee() * draws;
-    }
-
-    function _bombardmentFee() internal view returns (uint256) {
-        uint256 draws =
-            uint256(1) + uint256(game.BOMBARDMENT_STRIKE_COUNT()) * game.BOMBARDMENT_ATTEMPTS_PER_CELL();
-        return inco.getFee() * draws;
-    }
-
-    function _rakeFee() internal view returns (uint256) {
-        uint256 draws = uint256(1) + uint256(game.RAKE_STRIKE_COUNT()) * game.RAKE_ATTEMPTS_PER_CELL();
-        return inco.getFee() * draws;
-    }
-
     function testBarrageStrikesFourToSixCellsAndRevealsEach() public {
         (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
         uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
         address user = game.getTurn(matchId);
 
-        vm.deal(user, 1 ether);
-        uint256 fee = _barrageFee();
         vm.prank(user);
-        game.useBarrage{value: fee}(matchId, 0, 0);
+        game.useBarrage(matchId, 0, 0);
+        uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
         processAllOperations();
-        uint256 packed = _confirmPendingBarrage(matchId, user);
+        _confirmPendingBarrage(matchId, user);
 
-        uint256 activeCount = 0;
-        for (uint8 k = 0; k < game.BARRAGE_MAX_CELLS(); k++) {
-            if (_decodeAreaSlot(packed, k, game.BARRAGE_LOCAL_POS_BITS()) != 0) activeCount++;
+        assertGe(cells.length, game.BARRAGE_MIN_CELLS(), "barrage should strike at least the minimum cell count");
+        assertLe(cells.length, game.BARRAGE_MAX_CELLS(), "barrage should never strike more than the maximum");
+        for (uint8 i = 0; i < cells.length; i++) {
+            assertLt(cells[i], game.BOARD_CELLS(), "every struck cell should be on the board");
+            uint8 localRow = cells[i] / 15;
+            uint8 localCol = cells[i] % 15;
+            assertLt(localRow, game.BARRAGE_AREA_SIZE(), "struck cell should fall within the aimed 4x4 area");
+            assertLt(localCol, game.BARRAGE_AREA_SIZE(), "struck cell should fall within the aimed 4x4 area");
+            for (uint8 j = i + 1; j < cells.length; j++) {
+                assertTrue(cells[i] != cells[j], "struck cells should be distinct");
+            }
         }
-        assertGe(activeCount, game.BARRAGE_MIN_CELLS(), "barrage should strike at least the minimum cell count");
-        assertLe(activeCount, game.BARRAGE_MAX_CELLS(), "barrage should never strike more than the maximum");
+    }
+
+    /// @dev The caller only chooses the aimed area (anchorRow, anchorCol),
+    /// which cells within that area get struck comes from a seed the
+    /// caller does not control (block.prevrandao, matchId, the caller's
+    /// own address and a per-match nonce, see Ciphertide._publicStrikeSeed).
+    /// Firing an identical anchor from the same attacker in two different
+    /// matches should not strike the same cell set both times, since only
+    /// matchId differs between the two calls: proof that the outcome is
+    /// not just a function of the caller-supplied arguments.
+    function testBarrageCellChoiceIsNotDeterminedByCallerSuppliedArgumentsAlone() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+
+        uint256 matchIdA = _setupInProgressMatch(alice, bob, board0, ships0);
+        address userA = game.getTurn(matchIdA);
+        vm.prank(userA);
+        game.useBarrage(matchIdA, 0, 0);
+        uint8[] memory cellsA = game.getPendingAreaCellsForTesting(matchIdA);
+
+        uint256 matchIdB = _setupInProgressMatch(alice, bob, board0, ships0);
+        address userB = game.getTurn(matchIdB);
+        vm.prank(userB);
+        game.useBarrage(matchIdB, 0, 0);
+        uint8[] memory cellsB = game.getPendingAreaCellsForTesting(matchIdB);
+
+        bool identical = cellsA.length == cellsB.length;
+        if (identical) {
+            for (uint256 i = 0; i < cellsA.length; i++) {
+                if (cellsA[i] != cellsB[i]) {
+                    identical = false;
+                    break;
+                }
+            }
+        }
+        assertFalse(
+            identical,
+            "the same anchor from two different matches should not pick the exact same cell set, only matchId differed"
+        );
+    }
+
+    /// @dev A player cannot steer which cells a barrage will hit by varying
+    /// anything they actually control in the call: useBarrage only takes
+    /// the anchor (which area, not which cells inside it) and the match id
+    /// they are already locked into. This exercises the seed formula and
+    /// picker directly (CiphertideMechanics.pickAreaCells,
+    /// Ciphertide._publicStrikeSeed's own formula reproduced here) to show
+    /// the outcome only moves when block.prevrandao, matchId, the attacker
+    /// address or the nonce move, none of which a caller can pick as an
+    /// argument to useBarrage.
+    function testPickAreaCellsOnlyDependsOnTheSeedNotOnAnyCallerChoosableArgument() public view {
+        CiphertideMechanics.AreaGeometry memory area =
+            CiphertideMechanics.AreaGeometry({anchorRow: 0, anchorCol: 0, width: 4, height: 4});
+
+        uint256 seed1 = uint256(keccak256(abi.encode(block.prevrandao, uint256(1), alice, uint32(0))));
+        uint256 seed2 = uint256(keccak256(abi.encode(block.prevrandao, uint256(2), alice, uint32(0))));
+
+        uint8[] memory cells1a = CiphertideMechanics.pickAreaCells(seed1, area, 4, 6, 0);
+        uint8[] memory cells1b = CiphertideMechanics.pickAreaCells(seed1, area, 4, 6, 0);
+        uint8[] memory cells2 = CiphertideMechanics.pickAreaCells(seed2, area, 4, 6, 0);
+
+        assertEq(cells1a.length, cells1b.length, "the exact same seed should always pick the same count");
+        for (uint256 i = 0; i < cells1a.length; i++) {
+            assertEq(cells1a[i], cells1b[i], "the exact same seed should always pick the same cells, in the same order");
+        }
+
+        bool identical = cells1a.length == cells2.length;
+        if (identical) {
+            for (uint256 i = 0; i < cells1a.length; i++) {
+                if (cells1a[i] != cells2[i]) {
+                    identical = false;
+                    break;
+                }
+            }
+        }
+        assertFalse(identical, "changing only matchId (part of the seed, not a useBarrage argument) should change the pick");
     }
 
     function testBarrageConsumesChargeAndPassesTurn() public {
@@ -756,9 +814,8 @@ contract CiphertideTest is IncoTest {
         uint8 userIdx = game.getPlayerAddress(matchId, 0) == user ? 0 : 1;
 
         vm.deal(user, 1 ether);
-        uint256 fee = _barrageFee();
         vm.prank(user);
-        game.useBarrage{value: fee}(matchId, 0, 0);
+        game.useBarrage(matchId, 0, 0);
         processAllOperations();
         _confirmPendingBarrage(matchId, user);
 
@@ -775,7 +832,7 @@ contract CiphertideTest is IncoTest {
         vm.deal(user, 1 ether);
         vm.prank(user);
         vm.expectRevert("barrage already used");
-        game.useBarrage{value: fee}(matchId, 5, 5);
+        game.useBarrage(matchId, 5, 5);
     }
 
     /// @dev A barrage covering a mine still applies the mine penalty even
@@ -816,16 +873,15 @@ contract CiphertideTest is IncoTest {
             if (game.getTurn(matchId) != bob) continue;
 
             vm.deal(bob, 1 ether);
-            uint256 fee = _barrageFee();
             vm.prank(bob);
-            game.useBarrage{value: fee}(matchId, 0, 0);
+            game.useBarrage(matchId, 0, 0);
             processAllOperations();
             uint256 packed = _confirmPendingBarrage(matchId, bob);
 
             bool sawShipHit = false;
             bool sawMine = false;
             for (uint8 k = 0; k < game.BARRAGE_MAX_CELLS(); k++) {
-                uint256 code = _decodeAreaSlot(packed, k, game.BARRAGE_LOCAL_POS_BITS());
+                uint256 code = _decodeAreaSlot(packed, k);
                 if (code == 2) sawShipHit = true;
                 if (code == 3) sawMine = true;
             }
@@ -1127,29 +1183,71 @@ contract CiphertideTest is IncoTest {
         game.shoot(matchId, 220);
     }
 
+    /// @dev Predicts which cells a barrage, bombardment or rake will strike
+    /// before it fires, by replicating Ciphertide's own seed formula
+    /// (_publicStrikeSeed: block.prevrandao, matchId, the attacker, and a
+    /// fresh match's first such skill always has nonce 0) and calling the
+    /// same pure CiphertideMechanics.pickAreaCells the contract itself
+    /// calls. Used to choose which real ship cell to shield so a shield
+    /// break test observes its outcome on the first try instead of
+    /// retrying across fresh matches and rounds, since fakePrepareEuint256Ciphertext's
+    /// (value, owner, contract) ciphertext is deterministic and repeating a
+    /// cellIdx placeShield already used earlier in the same test collides
+    /// in the mock Inco handle store.
+    function _predictedAreaCells(
+        uint256 matchId,
+        address attacker,
+        CiphertideMechanics.AreaGeometry memory area,
+        uint8 minCells,
+        uint8 maxCells
+    ) internal view returns (uint8[] memory cells) {
+        uint256 seed = uint256(keccak256(abi.encode(block.prevrandao, matchId, attacker, uint32(0))));
+        cells = CiphertideMechanics.pickAreaCells(seed, area, minCells, maxCells, 0);
+    }
+
+    /// @dev First entry of candidates that also appears in predicted, or
+    /// reverts with "not found" if none does; used to find a real ship
+    /// cell the upcoming strike is predicted to hit.
+    function _firstMatch(uint8[] memory predicted, uint8[] memory candidates) internal pure returns (uint8, bool) {
+        for (uint256 i = 0; i < candidates.length; i++) {
+            for (uint256 j = 0; j < predicted.length; j++) {
+                if (predicted[j] == candidates[i]) return (candidates[i], true);
+            }
+        }
+        return (0, false);
+    }
+
     /// @dev A barrage that strikes the shielded cell breaks it exactly once
     /// (no damage, cell survives, shield consumed), while any other struck
-    /// cells resolve normally. The strike area is random, so this retries
-    /// across fresh matches until it lands on the shielded cell, the same
-    /// pattern testBarrageMinePenaltyAppliesAlongsideShipHits uses.
+    /// cells resolve normally. Retries across fresh matches until the
+    /// predicted strike (_predictedAreaCells) includes one of the tiny
+    /// ships board's real ship cells that also falls in the barrage's
+    /// (0,0) anchored 4x4 area (cells 0 to 3), then shields exactly that
+    /// cell so the break is observed on that same round.
     function testBarrageBreaksShieldOnceWithoutDestroyingShip() public {
-        bool observedBreak = false;
-        for (uint256 round = 0; round < 10 && !observedBreak; round++) {
-            // Cells 0-3 are all real single-cell ships on the tiny ships
-            // board, and all fall within the barrage's (0,0) anchored 4x4
-            // area (local row 0, columns 0-3), so any of them works as the
-            // shielded cell. Rotated per round so each round's placeShield
-            // ciphertext differs, the fake ciphertext used in tests is
-            // deterministic per (value, owner, contract), and reusing the
-            // exact same one across matches collides in the mock Inco
-            // handle store.
-            uint8 cellIdx = uint8(round % 4);
+        uint8[] memory realShipCellsInArea = new uint8[](4);
+        realShipCellsInArea[0] = 0;
+        realShipCellsInArea[1] = 1;
+        realShipCellsInArea[2] = 2;
+        realShipCellsInArea[3] = 3;
 
+        bool observedBreak = false;
+        for (uint256 round = 0; round < 20 && !observedBreak; round++) {
             (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
             uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
             if (game.getTurn(matchId) != alice) {
                 _passTurnWithMiss(matchId, bob, 200);
             }
+
+            uint8[] memory predicted = _predictedAreaCells(
+                matchId,
+                bob,
+                CiphertideMechanics.AreaGeometry({anchorRow: 0, anchorCol: 0, width: 4, height: 4}),
+                game.BARRAGE_MIN_CELLS(),
+                game.BARRAGE_MAX_CELLS()
+            );
+            (uint8 cellIdx, bool found) = _firstMatch(predicted, realShipCellsInArea);
+            if (!found) continue;
 
             _placeShield(matchId, alice, cellIdx);
             processAllOperations();
@@ -1158,22 +1256,20 @@ contract CiphertideTest is IncoTest {
             // board. Cell 100 is water on both test boards.
             _passTurnWithMiss(matchId, alice, 100);
 
-            vm.deal(bob, 1 ether);
-            uint256 fee = _barrageFee();
             vm.prank(bob);
             // Anchored at (0,0), the 4x4 area covers cells 0-3 among others.
-            game.useBarrage{value: fee}(matchId, 0, 0);
+            game.useBarrage(matchId, 0, 0);
+            uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
             processAllOperations();
             uint256 packed = _confirmPendingBarrage(matchId, bob);
 
             uint256 breakCount = 0;
             bool shieldedCellWasBreak = false;
-            for (uint8 k = 0; k < game.BARRAGE_MAX_CELLS(); k++) {
-                uint256 code = _decodeAreaSlot(packed, k, game.BARRAGE_LOCAL_POS_BITS());
+            for (uint8 k = 0; k < cells.length; k++) {
+                uint256 code = _decodeAreaSlot(packed, k);
                 if (code != 4) continue;
                 breakCount++;
-                uint256 localPos = ((packed >> (uint256(k) * 7)) & 0x7F) & 0xF;
-                if (localPos == cellIdx) shieldedCellWasBreak = true;
+                if (cells[k] == cellIdx) shieldedCellWasBreak = true;
             }
             if (!shieldedCellWasBreak) continue;
             observedBreak = true;
@@ -1213,26 +1309,23 @@ contract CiphertideTest is IncoTest {
             _passTurnWithMiss(matchId, alice, 200);
         }
 
-        vm.deal(bob, 1 ether);
-        uint256 fee = _bombardmentFee();
         vm.prank(bob);
-        game.useBombardment{value: fee}(matchId, 0, 0);
+        game.useBombardment(matchId, 0, 0);
+        uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
         processAllOperations();
-        uint256 packed = _confirmPendingBombardment(matchId, bob);
+        _confirmPendingBombardment(matchId, bob);
 
-        uint256 activeCount = 0;
-        uint256 seenPositions = 0;
-        for (uint8 k = 0; k < game.BOMBARDMENT_STRIKE_COUNT(); k++) {
-            uint256 code = _decodeAreaSlot(packed, k, game.BOMBARDMENT_LOCAL_POS_BITS());
-            if (code == 0) continue;
-            activeCount++;
-            uint256 slotBits = uint256(game.BOMBARDMENT_LOCAL_POS_BITS()) + 3;
-            uint256 posMask = (uint256(1) << game.BOMBARDMENT_LOCAL_POS_BITS()) - 1;
-            uint256 localPos = (packed >> (uint256(k) * slotBits)) & posMask;
-            assertEq(seenPositions & (uint256(1) << localPos), 0, "every struck local position should be distinct");
-            seenPositions |= (uint256(1) << localPos);
+        assertEq(cells.length, game.BOMBARDMENT_STRIKE_COUNT(), "bombardment should always strike exactly 15 cells");
+        uint256 seenCells = 0;
+        for (uint8 k = 0; k < cells.length; k++) {
+            assertLt(cells[k], game.BOARD_CELLS(), "every struck cell should be on the board");
+            uint8 localRow = cells[k] / 15;
+            uint8 localCol = cells[k] % 15;
+            assertLt(localRow, game.BOMBARDMENT_AREA_SIZE(), "struck cell should fall within the aimed 10x10 area");
+            assertLt(localCol, game.BOMBARDMENT_AREA_SIZE(), "struck cell should fall within the aimed 10x10 area");
+            assertEq(seenCells & (uint256(1) << cells[k]), 0, "every struck cell should be distinct");
+            seenCells |= (uint256(1) << cells[k]);
         }
-        assertEq(activeCount, game.BOMBARDMENT_STRIKE_COUNT(), "bombardment should always strike exactly 15 cells");
     }
 
     function testBombardmentConsumesChargeAndPassesTurn() public {
@@ -1244,9 +1337,8 @@ contract CiphertideTest is IncoTest {
         uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
 
         vm.deal(bob, 1 ether);
-        uint256 fee = _bombardmentFee();
         vm.prank(bob);
-        game.useBombardment{value: fee}(matchId, 0, 0);
+        game.useBombardment(matchId, 0, 0);
         processAllOperations();
         _confirmPendingBombardment(matchId, bob);
 
@@ -1263,7 +1355,7 @@ contract CiphertideTest is IncoTest {
         vm.deal(bob, 1 ether);
         vm.prank(bob);
         vm.expectRevert("bombardment already used");
-        game.useBombardment{value: fee}(matchId, 1, 1);
+        game.useBombardment(matchId, 1, 1);
     }
 
     function testOnlyCaptainBombardmentCanUseIt() public {
@@ -1274,11 +1366,10 @@ contract CiphertideTest is IncoTest {
             _passTurnWithMiss(matchId, bob, 200);
         }
 
-        uint256 fee = _bombardmentFee();
         vm.deal(alice, 1 ether);
         vm.prank(alice);
         vm.expectRevert("captain does not own this skill");
-        game.useBombardment{value: fee}(matchId, 0, 0);
+        game.useBombardment(matchId, 0, 0);
     }
 
     function testBombardmentRevertsIfAreaDoesNotFit() public {
@@ -1290,16 +1381,15 @@ contract CiphertideTest is IncoTest {
 
         // BOARD_SIZE is 15 and the area is 10x10, so anchor row or column 6
         // pushes it one cell past the edge (6 + 10 = 16 > 15).
-        uint256 fee = _bombardmentFee();
         vm.deal(bob, 1 ether);
         vm.prank(bob);
         vm.expectRevert("bombardment area does not fit on the board");
-        game.useBombardment{value: fee}(matchId, 6, 0);
+        game.useBombardment(matchId, 6, 0);
 
         vm.deal(bob, 1 ether);
         vm.prank(bob);
         vm.expectRevert("bombardment area does not fit on the board");
-        game.useBombardment{value: fee}(matchId, 0, 6);
+        game.useBombardment(matchId, 0, 6);
     }
 
     /// @dev Bombardment can sink ships and win exactly like Barrage. Cells
@@ -1328,11 +1418,10 @@ contract CiphertideTest is IncoTest {
             assertEq(game.getTurn(matchId), bob, "five hits in a row should keep bob's turn");
 
             vm.deal(bob, 1 ether);
-            uint256 fee = _bombardmentFee();
             vm.prank(bob);
             // Anchored at (0,0), the 10x10 area covers cell 5 (row 0, col 5)
             // among 99 others.
-            game.useBombardment{value: fee}(matchId, 0, 0);
+            game.useBombardment(matchId, 0, 0);
             processAllOperations();
             _confirmPendingBombardment(matchId, bob);
 
@@ -1372,15 +1461,14 @@ contract CiphertideTest is IncoTest {
         processAllOperations();
 
         vm.deal(bob, 1 ether);
-        uint256 fee = _bombardmentFee();
         vm.prank(bob);
-        game.useBombardment{value: fee}(matchId, 0, 0);
+        game.useBombardment(matchId, 0, 0);
         processAllOperations();
         uint256 packed = _confirmPendingBombardment(matchId, bob);
 
         uint256 mineCount = 0;
         for (uint8 k = 0; k < game.BOMBARDMENT_STRIKE_COUNT(); k++) {
-            if (_decodeAreaSlot(packed, k, game.BOMBARDMENT_LOCAL_POS_BITS()) == 3) mineCount++;
+            if (_decodeAreaSlot(packed, k) == 3) mineCount++;
         }
         assertGe(mineCount, 2, "the near-fully-mined area should reliably clip more than one mine in one strike");
         assertTrue(game.hasBonusShot(matchId, aliceIdx), "clipping any mines should grant the owner a bonus");
@@ -1389,22 +1477,32 @@ contract CiphertideTest is IncoTest {
     /// @dev A bombardment that strikes the shielded cell breaks it exactly
     /// once (no damage, cell survives, shield consumed), mirroring
     /// testBarrageBreaksShieldOnceWithoutDestroyingShip but over
-    /// Bombardment's larger area and fixed 15 cell count.
+    /// Bombardment's larger area and fixed 15 cell count. Same predicted-
+    /// cell approach as the barrage version, over the 6 real ship cells the
+    /// bombardment's bigger 10x10 area covers.
     function testBombardmentBreaksShieldOnceWithoutDestroyingShip() public {
-        bool observedBreak = false;
-        for (uint256 round = 0; round < 30 && !observedBreak; round++) {
-            // Cells 0-5 are all real single-cell ships on the tiny ships
-            // board, and all fall within the bombardment's (0,0) anchored
-            // 10x10 area (local row 0, columns 0-5). Rotated per round for
-            // the same ciphertext-collision reason
-            // testBarrageBreaksShieldOnceWithoutDestroyingShip documents.
-            uint8 cellIdx = uint8(round % 6);
+        uint8[] memory realShipCellsInArea = new uint8[](6);
+        for (uint8 i = 0; i < 6; i++) {
+            realShipCellsInArea[i] = i;
+        }
 
+        bool observedBreak = false;
+        for (uint256 round = 0; round < 20 && !observedBreak; round++) {
             (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
             uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
             if (game.getTurn(matchId) != alice) {
                 _passTurnWithMiss(matchId, bob, 200);
             }
+
+            uint8[] memory predicted = _predictedAreaCells(
+                matchId,
+                bob,
+                CiphertideMechanics.AreaGeometry({anchorRow: 0, anchorCol: 0, width: 10, height: 10}),
+                game.BOMBARDMENT_STRIKE_COUNT(),
+                game.BOMBARDMENT_STRIKE_COUNT()
+            );
+            (uint8 cellIdx, bool found) = _firstMatch(predicted, realShipCellsInArea);
+            if (!found) continue;
 
             _placeShield(matchId, alice, cellIdx);
             processAllOperations();
@@ -1413,24 +1511,19 @@ contract CiphertideTest is IncoTest {
             // alice's board. Cell 100 is water on both test boards.
             _passTurnWithMiss(matchId, alice, 100);
 
-            vm.deal(bob, 1 ether);
-            uint256 fee = _bombardmentFee();
             vm.prank(bob);
-            game.useBombardment{value: fee}(matchId, 0, 0);
+            game.useBombardment(matchId, 0, 0);
+            uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
             processAllOperations();
             uint256 packed = _confirmPendingBombardment(matchId, bob);
 
             uint256 breakCount = 0;
             bool shieldedCellWasBreak = false;
-            uint256 posBits = game.BOMBARDMENT_LOCAL_POS_BITS();
-            uint256 slotBits = posBits + 3;
-            uint256 posMask = (uint256(1) << posBits) - 1;
-            for (uint8 k = 0; k < game.BOMBARDMENT_STRIKE_COUNT(); k++) {
-                uint256 code = _decodeAreaSlot(packed, k, uint8(posBits));
+            for (uint8 k = 0; k < cells.length; k++) {
+                uint256 code = _decodeAreaSlot(packed, k);
                 if (code != 4) continue;
                 breakCount++;
-                uint256 localPos = (packed >> (uint256(k) * slotBits)) & posMask;
-                if (localPos == cellIdx) shieldedCellWasBreak = true;
+                if (cells[k] == cellIdx) shieldedCellWasBreak = true;
             }
             if (!shieldedCellWasBreak) continue;
             observedBreak = true;
@@ -1473,28 +1566,19 @@ contract CiphertideTest is IncoTest {
             _passTurnWithMiss(matchId, bob, 200);
         }
 
-        vm.deal(alice, 1 ether);
-        uint256 fee = _rakeFee();
         vm.prank(alice);
-        game.useRake{value: fee}(matchId, 0);
+        game.useRake(matchId, 0);
+        uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
         processAllOperations();
-        uint256 packed = _confirmPendingRake(matchId, alice);
+        _confirmPendingRake(matchId, alice);
 
-        uint256 activeCount = 0;
-        uint256 seenPositions = 0;
-        uint256 posBits = game.RAKE_LOCAL_POS_BITS();
-        uint256 slotBits = posBits + 3;
-        uint256 posMask = (uint256(1) << posBits) - 1;
-        for (uint8 k = 0; k < game.RAKE_STRIKE_COUNT(); k++) {
-            uint256 code = _decodeAreaSlot(packed, k, uint8(posBits));
-            if (code == 0) continue;
-            activeCount++;
-            uint256 localPos = (packed >> (uint256(k) * slotBits)) & posMask;
-            assertTrue(localPos < 15, "a rake local position should always be inside the 15 cell row");
-            assertEq(seenPositions & (uint256(1) << localPos), 0, "every struck local position should be distinct");
-            seenPositions |= (uint256(1) << localPos);
+        assertEq(cells.length, game.RAKE_STRIKE_COUNT(), "rake should always strike exactly 3 cells");
+        uint256 seenCells = 0;
+        for (uint8 k = 0; k < cells.length; k++) {
+            assertTrue(cells[k] < game.RAKE_ROW_LENGTH(), "a rake cell should always be inside the 15 cell row");
+            assertEq(seenCells & (uint256(1) << cells[k]), 0, "every struck cell should be distinct");
+            seenCells |= (uint256(1) << cells[k]);
         }
-        assertEq(activeCount, game.RAKE_STRIKE_COUNT(), "rake should always strike exactly 3 cells");
     }
 
     function testRakeConsumesChargeAndPassesTurn() public {
@@ -1508,9 +1592,8 @@ contract CiphertideTest is IncoTest {
         uint8 aliceIdx = game.getPlayerAddress(matchId, 0) == alice ? 0 : 1;
 
         vm.deal(alice, 1 ether);
-        uint256 fee = _rakeFee();
         vm.prank(alice);
-        game.useRake{value: fee}(matchId, 0);
+        game.useRake(matchId, 0);
         processAllOperations();
         _confirmPendingRake(matchId, alice);
 
@@ -1527,7 +1610,7 @@ contract CiphertideTest is IncoTest {
         vm.deal(alice, 1 ether);
         vm.prank(alice);
         vm.expectRevert("rake already used");
-        game.useRake{value: fee}(matchId, 1);
+        game.useRake(matchId, 1);
     }
 
     function testOnlyCaptainRakeCanUseIt() public {
@@ -1537,11 +1620,10 @@ contract CiphertideTest is IncoTest {
         // _createAndJoinMatch, neither is rake.
         address turnPlayer = game.getTurn(matchId);
 
-        uint256 fee = _rakeFee();
         vm.deal(turnPlayer, 1 ether);
         vm.prank(turnPlayer);
         vm.expectRevert("captain does not own this skill");
-        game.useRake{value: fee}(matchId, 0);
+        game.useRake(matchId, 0);
     }
 
     function testRakeRevertsOnInvalidRow() public {
@@ -1554,11 +1636,10 @@ contract CiphertideTest is IncoTest {
         }
 
         // BOARD_SIZE is 15, so row 15 is one past the last valid row (0-14).
-        uint256 fee = _rakeFee();
         vm.deal(alice, 1 ether);
         vm.prank(alice);
         vm.expectRevert("invalid row");
-        game.useRake{value: fee}(matchId, 15);
+        game.useRake(matchId, 15);
     }
 
     /// @dev Rake can sink a ship and win exactly like Barrage and
@@ -1591,10 +1672,9 @@ contract CiphertideTest is IncoTest {
             assertEq(game.getTurn(matchId), alice, "five hits in a row should keep alice's turn");
 
             vm.deal(alice, 1 ether);
-            uint256 fee = _rakeFee();
             vm.prank(alice);
             // Row 0 covers cell 5 (row 0, col 5) among the other 14 cells.
-            game.useRake{value: fee}(matchId, 0);
+            game.useRake(matchId, 0);
             processAllOperations();
             _confirmPendingRake(matchId, alice);
 
@@ -1632,15 +1712,14 @@ contract CiphertideTest is IncoTest {
             processAllOperations();
 
             vm.deal(alice, 1 ether);
-            uint256 fee = _rakeFee();
             vm.prank(alice);
-            game.useRake{value: fee}(matchId, 0);
+            game.useRake(matchId, 0);
             processAllOperations();
             uint256 packed = _confirmPendingRake(matchId, alice);
 
             bool foundMine = false;
             for (uint8 k = 0; k < game.RAKE_STRIKE_COUNT(); k++) {
-                if (_decodeAreaSlot(packed, k, game.RAKE_LOCAL_POS_BITS()) == 3) foundMine = true;
+                if (_decodeAreaSlot(packed, k) == 3) foundMine = true;
             }
             if (!foundMine) continue;
             sawMine = true;
@@ -1654,24 +1733,35 @@ contract CiphertideTest is IncoTest {
     /// @dev A rake that strikes the shielded cell breaks it exactly once
     /// (no damage, cell survives, shield consumed), mirroring
     /// testBombardmentBreaksShieldOnceWithoutDestroyingShip but over Rake's
-    /// row shaped area and fixed 3 cell count.
+    /// row shaped area and fixed 3 cell count. Same predicted-cell approach
+    /// as the barrage and bombardment versions, over the 6 real ship cells
+    /// row 0 covers.
     function testRakeBreaksShieldOnceWithoutDestroyingShip() public {
         uint8 shieldCaptain = game.CAPTAIN_SHIELD();
         uint8 rakeCaptain = game.CAPTAIN_RAKE();
-        bool observedBreak = false;
-        for (uint256 round = 0; round < 30 && !observedBreak; round++) {
-            // Cells 0-5 are all real single-cell ships on the tiny ships
-            // board, and all fall within row 0. Rotated per round for the
-            // same ciphertext-collision reason
-            // testBarrageBreaksShieldOnceWithoutDestroyingShip documents.
-            uint8 cellIdx = uint8(round % 6);
+        uint8[] memory realShipCellsInArea = new uint8[](6);
+        for (uint8 i = 0; i < 6; i++) {
+            realShipCellsInArea[i] = i;
+        }
 
+        bool observedBreak = false;
+        for (uint256 round = 0; round < 20 && !observedBreak; round++) {
             (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
             uint256 matchId =
                 _setupInProgressMatchWithCaptains(alice, bob, shieldCaptain, rakeCaptain, board0, ships0);
             if (game.getTurn(matchId) != alice) {
                 _passTurnWithMiss(matchId, bob, 200);
             }
+
+            uint8[] memory predicted = _predictedAreaCells(
+                matchId,
+                bob,
+                CiphertideMechanics.AreaGeometry({anchorRow: 0, anchorCol: 0, width: game.RAKE_ROW_LENGTH(), height: 1}),
+                game.RAKE_STRIKE_COUNT(),
+                game.RAKE_STRIKE_COUNT()
+            );
+            (uint8 cellIdx, bool found) = _firstMatch(predicted, realShipCellsInArea);
+            if (!found) continue;
 
             _placeShield(matchId, alice, cellIdx);
             processAllOperations();
@@ -1680,24 +1770,19 @@ contract CiphertideTest is IncoTest {
             // board. Cell 100 is water on both test boards.
             _passTurnWithMiss(matchId, alice, 100);
 
-            vm.deal(bob, 1 ether);
-            uint256 fee = _rakeFee();
             vm.prank(bob);
-            game.useRake{value: fee}(matchId, 0);
+            game.useRake(matchId, 0);
+            uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
             processAllOperations();
             uint256 packed = _confirmPendingRake(matchId, bob);
 
             uint256 breakCount = 0;
             bool shieldedCellWasBreak = false;
-            uint256 posBits = game.RAKE_LOCAL_POS_BITS();
-            uint256 slotBits = posBits + 3;
-            uint256 posMask = (uint256(1) << posBits) - 1;
-            for (uint8 k = 0; k < game.RAKE_STRIKE_COUNT(); k++) {
-                uint256 code = _decodeAreaSlot(packed, k, uint8(posBits));
+            for (uint8 k = 0; k < cells.length; k++) {
+                uint256 code = _decodeAreaSlot(packed, k);
                 if (code != 4) continue;
                 breakCount++;
-                uint256 localPos = (packed >> (uint256(k) * slotBits)) & posMask;
-                if (localPos == cellIdx) shieldedCellWasBreak = true;
+                if (cells[k] == cellIdx) shieldedCellWasBreak = true;
             }
             if (!shieldedCellWasBreak) continue;
             observedBreak = true;

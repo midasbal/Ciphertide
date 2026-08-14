@@ -89,4 +89,17 @@ contract CiphertideHarness is Ciphertide {
     function hasSkipNextTurn(uint256 matchId, uint8 playerIdx) external view returns (bool) {
         return matches[matchId].players[playerIdx].skipNextTurn;
     }
+
+    /// @dev The cells a pending barrage, bombardment or rake picked with
+    ///      public randomness, in the same order their packed result codes
+    ///      are bit-packed. Public information from the moment the strike
+    ///      fired, exposed here purely so tests can assert against the
+    ///      exact cells without re-deriving the seed themselves.
+    function getPendingAreaCellsForTesting(uint256 matchId) external view returns (uint8[] memory cells) {
+        Match storage m = matches[matchId];
+        cells = new uint8[](m.pendingAreaCellCount);
+        for (uint8 k = 0; k < m.pendingAreaCellCount; k++) {
+            cells[k] = m.pendingAreaCells[k];
+        }
+    }
 }

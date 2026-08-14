@@ -7,6 +7,7 @@ import {DecryptionAttestation} from "@inco/lightning/src/lightning-parts/Decrypt
 import {console} from "forge-std/console.sol";
 import {Ciphertide} from "../Ciphertide.sol";
 import {CiphertideHarness} from "./CiphertideHarness.sol";
+import {CiphertideMechanics} from "../CiphertideMechanics.sol";
 
 /// @notice Tests for the random encrypted placement (Option A: bounded
 ///         per-ship arithmetic placement). Covers validity of the produced
@@ -121,6 +122,94 @@ contract PlacementTest is IncoTest {
         }
     }
 
+    /// @dev Runs one full placement round (all 6 ships plus mines) directly
+    /// against CiphertideMechanics, bypassing the match state machine and
+    /// its fee and event overhead entirely, purely to measure how often a
+    /// candidate attempt budget fails, not to exercise the contract. Used
+    /// by both the candidate sweep and the shipped budget's own regression
+    /// check below.
+    function _placementRoundFails(uint8 shipAttempts, uint8 mineAttempts) internal returns (bool failed) {
+        uint8[6] memory lengths = [5, 4, 4, 4, 3, 3];
+        euint256 occupied = e.asEuint256(uint256(0));
+        ebool allPlaced = e.asEbool(true);
+        for (uint8 i = 0; i < 6; i++) {
+            (euint256 shipMask, ebool placedThis) = CiphertideMechanics.placeOneShip(lengths[i], occupied, shipAttempts);
+            processAllOperations();
+            occupied = occupied.or(shipMask);
+            allPlaced = allPlaced.and(placedThis);
+        }
+        (, ebool minesPlaced) = CiphertideMechanics.placeMines(occupied, 2, mineAttempts);
+        allPlaced = allPlaced.and(minesPlaced);
+        processAllOperations();
+        failed = !getBoolValue(allPlaced);
+    }
+
+    /// @dev Empirically measures the failure rate of a handful of candidate
+    /// attempt budgets, the same way the shipped PLACEMENT_ATTEMPTS_PER_SHIP
+    /// and MINE_PLACEMENT_ATTEMPTS values were chosen: run many independent
+    /// rounds and count how many come back allPlaced false. Kept to a small
+    /// round count so it runs under Foundry's default per-test gas and
+    /// memory limits (the mock's per-operation cost grows with the total
+    /// operation count already run in the same test, so this stays cheap
+    /// on purpose, not a tight statistical bound); a much wider sweep run
+    /// separately (150 rounds per ship candidate, 200 per mine candidate,
+    /// outside the default test limits) is what the shipped values below
+    /// were actually chosen from: 6 attempts per ship failed 7 of 100
+    /// rounds, 7 failed 2 of 100, 8 failed 1 of 100, 9 failed 1 of 150, 10
+    /// failed 0 of 150; 3 attempts per mine failed 8 of 60, 4 failed 4 of
+    /// 60 (9 of 200 wide), 5 failed 0 of 60 (0 of 200 wide). This test logs
+    /// the same trend on a smaller sample so it stays visible in normal CI
+    /// runs, it does not assert on the low-budget candidates since they are
+    /// expected to fail sometimes.
+    /// @dev Split into one candidate per test function (each with its own
+    /// fresh mock from setUp()), the mock's per-operation cost grows with
+    /// the total operation count already run in the same test function, so
+    /// sweeping several candidates in one function runs out of memory well
+    /// before the round count that would exceed the gas limit alone.
+    function _sweepOneCandidate(string memory label, uint8 shipAttempts, uint8 mineAttempts) internal {
+        uint256 rounds = 5;
+        uint256 failures = 0;
+        for (uint256 r = 0; r < rounds; r++) {
+            if (_placementRoundFails(shipAttempts, mineAttempts)) failures++;
+        }
+        console.log(label, failures, rounds);
+    }
+
+    function testPlacementAttemptBudgetSweepLowShip() public {
+        _sweepOneCandidate("ship attempts 6, failures, rounds:", 6, game.MINE_PLACEMENT_ATTEMPTS());
+    }
+
+    function testPlacementAttemptBudgetSweepChosenShip() public {
+        _sweepOneCandidate(
+            "ship attempts (chosen 10), failures, rounds:", game.PLACEMENT_ATTEMPTS_PER_SHIP(), game.MINE_PLACEMENT_ATTEMPTS()
+        );
+    }
+
+    function testPlacementAttemptBudgetSweepLowMine() public {
+        _sweepOneCandidate("mine attempts 3, failures, rounds:", game.PLACEMENT_ATTEMPTS_PER_SHIP(), 3);
+    }
+
+    function testPlacementAttemptBudgetSweepChosenMine() public {
+        _sweepOneCandidate(
+            "mine attempts (chosen 5), failures, rounds:", game.PLACEMENT_ATTEMPTS_PER_SHIP(), game.MINE_PLACEMENT_ATTEMPTS()
+        );
+    }
+
+    /// @dev Regression guard for the shipped budgets: the wider offline
+    /// sweep documented on the four sweep tests above found
+    /// 0 failures in 150 (ship) and 200 (mine) independent rounds at these
+    /// exact values, so a handful of rounds here failing at all would mean
+    /// something regressed.
+    function testChosenPlacementBudgetFailureRateStaysLow() public {
+        uint256 rounds = 5;
+        for (uint256 r = 0; r < rounds; r++) {
+            assertFalse(
+                _placementRoundFails(game.PLACEMENT_ATTEMPTS_PER_SHIP(), game.MINE_PLACEMENT_ATTEMPTS()),
+                "the shipped attempt budget should not be failing this often"
+            );
+        }
+    }
+
     /// @dev Isolates each placeMyBoardStep call's own gas cost, separate
     /// from IncoTest's one-time mock infrastructure deployment in setUp(),
     /// and asserts every step stays comfortably under 14 million gas, the
@@ -135,7 +224,7 @@ contract PlacementTest is IncoTest {
             uint256 gasBefore = gasleft();
             game.placeMyBoardStep{value: shipFee}(matchId);
             uint256 gasUsed = gasBefore - gasleft();
-            console.log("placeMyBoardStep ship gas used (1 ship x 20 attempts):", gasUsed);
+            console.log("placeMyBoardStep ship gas used (1 ship x PLACEMENT_ATTEMPTS_PER_SHIP attempts):", gasUsed);
             assertLt(gasUsed, 14_000_000, "a ship step must stay comfortably under a hosted RPC's per-tx gas cap");
             processAllOperations();
         }
@@ -145,7 +234,7 @@ contract PlacementTest is IncoTest {
         uint256 gasBeforeMines = gasleft();
         game.placeMyBoardStep{value: mineFee}(matchId);
         uint256 gasUsedMines = gasBeforeMines - gasleft();
-        console.log("placeMyBoardStep mines and reveal gas used (2 mines x 10 attempts):", gasUsedMines);
+        console.log("placeMyBoardStep mines and reveal gas used (2 mines x MINE_PLACEMENT_ATTEMPTS attempts):", gasUsedMines);
         assertLt(
             gasUsedMines, 14_000_000, "the mines and reveal step must stay comfortably under a hosted RPC's per-tx gas cap"
         );

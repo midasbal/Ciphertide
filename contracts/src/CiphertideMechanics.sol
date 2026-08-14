@@ -162,18 +162,12 @@ library CiphertideMechanics {
     // ---------------------------------------------------------------
     // Area strikes: strike resolution and result packing, shared by
     // Barrage, Bombardment, and any later skill with the same shape (aim
-    // a rectangle, strike some random distinct cells inside it, reveal
-    // each one).
+    // a rectangle, strike some distinct cells inside it, reveal each one).
+    // Which cells get struck is public information the instant a strike
+    // resolves, so the cells themselves are chosen with plain public
+    // randomness (pickAreaCells below), not a confidential draw, and only
+    // the per-cell hit or miss result stays confidential until reveal.
     // ---------------------------------------------------------------
-
-    /// @dev Bundles one area-strike slot's outputs into memory instead of
-    ///      three separate stack return values, keeping the picking loop's
-    ///      stack frame within the EVM's local variable limit.
-    struct AreaSlotResult {
-        euint256 newAvoid;
-        euint256 packedSlot;
-        euint256 struckContribution;
-    }
 
     /// @dev The rectangle a skill aims: width x height anchored at
     ///      (anchorRow, anchorCol). Bundled into one memory struct, instead
@@ -187,67 +181,108 @@ library CiphertideMechanics {
         uint8 height;
     }
 
-    /// @dev How many cells an area strike draws and how it packs them, kept
-    ///      in one memory struct for the same stack frame reason as
-    ///      AreaGeometry. minCells and maxCells set the randomized strike
-    ///      count's range (equal for a fixed count, like Bombardment's 15).
-    ///      positionBits must be wide enough to address width * height
-    ///      distinct local positions (Barrage: 4 bits for a 4x4, 16 cell
-    ///      area. Bombardment: 7 bits for a 10x10, 100 cell area).
-    struct StrikeConfig {
-        uint8 minCells;
-        uint8 maxCells;
-        uint8 attemptsPerCell;
-        uint8 positionBits;
+    /// @dev Picks which cells a public random strike hits (Barrage,
+    ///      Bombardment, Rake): entirely plaintext arithmetic, no
+    ///      encrypted values or random draws involved. Which cells a
+    ///      strike hits is going to be revealed the instant it resolves
+    ///      regardless, so spending a confidential randBounded draw per
+    ///      candidate cell (as an earlier version of this contract did)
+    ///      bought no privacy, only extra reveal latency: on Inco each
+    ///      confidential draw costs roughly one second of reveal wait once
+    ///      the action lands, so a 6 cell strike at 8 attempts each cost
+    ///      about 48 seconds just to pick cells nobody needed kept secret.
+    ///      This costs zero draws.
+    ///
+    ///      seed must come from a block value the caller cannot freely
+    ///      choose (see Ciphertide's _publicStrikeSeed), mixed with the
+    ///      match, the caller and a per-action nonce, so a player cannot
+    ///      predict or steer which cells their own strike will land on
+    ///      before sending the transaction.
+    ///
+    ///      Builds the list of in-area cells not already in shotsAgainstMe,
+    ///      draws the strike count from seed when minCells < maxCells (a
+    ///      fixed count when they are equal still consumes no seed bits for
+    ///      the count), then runs a partial Fisher-Yates shuffle over the
+    ///      free candidates, reseeding with keccak256 every draw so no
+    ///      single block value is reused across choices. If the area has
+    ///      fewer free cells than the chosen count (only possible once most
+    ///      of it has already been shot), the count is clamped down to
+    ///      however many free cells remain rather than reverting.
+    /// @dev A commit-reveal seed would hardened this further against a
+    ///      sequencer influencing block.prevrandao to bias outcomes; not
+    ///      needed for a game skill's cell choice on testnet today, worth
+    ///      revisiting if this ever needs a stronger fairness guarantee.
+    function pickAreaCells(uint256 seed, AreaGeometry memory area, uint8 minCells, uint8 maxCells, uint256 shotsAgainstMe)
+        external
+        pure
+        returns (uint8[] memory cells)
+    {
+        uint256 areaSize = uint256(area.width) * uint256(area.height);
+        uint8[] memory candidates = new uint8[](areaSize);
+        uint256 freeCount = 0;
+        for (uint256 i = 0; i < areaSize; i++) {
+            uint256 globalCell =
+                (uint256(area.anchorRow) + i / area.width) * BOARD_SIZE + (uint256(area.anchorCol) + i % area.width);
+            if ((shotsAgainstMe >> globalCell) & 1 == 0) {
+                candidates[freeCount] = uint8(globalCell);
+                freeCount++;
+            }
+        }
+
+        uint8 count = minCells;
+        if (maxCells > minCells) {
+            seed = uint256(keccak256(abi.encode(seed, uint256(0))));
+            count = minCells + uint8(seed % (uint256(maxCells - minCells) + 1));
+        }
+        if (uint256(count) > freeCount) {
+            count = uint8(freeCount);
+        }
+
+        cells = new uint8[](count);
+        for (uint8 k = 0; k < count; k++) {
+            seed = uint256(keccak256(abi.encode(seed, uint256(k) + 1)));
+            uint256 remaining = freeCount - k;
+            uint256 j = k + (seed % remaining);
+            (candidates[k], candidates[j]) = (candidates[j], candidates[k]);
+            cells[k] = candidates[k];
+        }
     }
 
-    /// @dev Draws the strike count (randomized between minCells and
-    ///      maxCells, or fixed when minCells == maxCells, which still
-    ///      spends one random draw so the fee accounting stays uniform),
-    ///      picks all candidate slots inside the given area, and folds the
-    ///      resulting struck cells into the defender's ship hit tracking.
-    ///      If a struck cell is the defender's active shielded cell, that
-    ///      slot resolves as a shield break (result code 4): no ship
-    ///      damage, and its contribution to the struck mask is zeroed.
-    ///      Whether the shield actually broke is only acted on later, once
-    ///      the caller reveals and decodes the returned packed value back
-    ///      to plaintext, this function only folds the break into the
-    ///      encrypted packing, it never reads or writes shieldActive.
-    ///
-    ///      Packs one result code (0 inactive, 1 miss, 2 ship hit, 3 mine,
-    ///      4 shield break) and a local cell position per slot into a
-    ///      single euint256: config.positionBits bits of local position,
-    ///      then 3 bits of code, (positionBits + 3) bits per slot, one slot
-    ///      per possible strike (config.maxCells slots total). Barrage: 4
-    ///      position bits, 7 bits per slot, 6 slots, 42 bits total.
-    ///      Bombardment: 7 position bits, 10 bits per slot, 15 slots, 150
-    ///      bits total. Both comfortably inside a single euint256's 256
-    ///      bits.
-    function resolveAreaStrikes(AreaGeometry memory area, PlayerSlot storage defender, StrikeConfig memory config)
+    /// @dev Resolves a set of already public, already chosen cells against
+    ///      the defender's hidden board: identical resolution shape to
+    ///      resolveChosenStrikes below (one 3 bit result code per cell, no
+    ///      local position needed since the caller already knows every
+    ///      cell), just sized to cells.length instead of Salvo's fixed 3,
+    ///      so it also covers Barrage's randomized 4 to 6 count and
+    ///      Bombardment's and Rake's fixed counts. Whether the shield
+    ///      actually broke is only acted on later, once the caller reveals
+    ///      and decodes the returned packed value, this function only
+    ///      folds the break into the encrypted packing, it never reads or
+    ///      writes shieldActive.
+    function resolveChosenAreaStrikes(uint8[] memory cells, PlayerSlot storage defender)
         external
         returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
     {
-        euint256 struckMask;
-        (packed, struckMask) = _pickAllAreaSlots(area, defender, config);
-        (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckMask);
-    }
-
-    function _pickAllAreaSlots(AreaGeometry memory area, PlayerSlot storage defender, StrikeConfig memory config)
-        internal
-        returns (euint256 packed, euint256 struckMask)
-    {
-        euint256 count = e.randBounded(uint256(config.maxCells - config.minCells) + 1).add(uint256(config.minCells));
-        euint256 avoid = e.asEuint256(defender.shotsAgainstMe);
-        struckMask = e.asEuint256(uint256(0));
+        euint256 struckMask = e.asEuint256(uint256(0));
         packed = e.asEuint256(uint256(0));
 
-        for (uint8 k = 0; k < config.maxCells; k++) {
-            ebool isActive = k < config.minCells ? e.asEbool(true) : count.gt(uint256(k));
-            AreaSlotResult memory r = _pickAreaSlot(area, k, isActive, avoid, defender, config);
-            avoid = r.newAvoid;
-            packed = packed.or(r.packedSlot);
-            struckMask = struckMask.or(r.struckContribution);
+        for (uint256 k = 0; k < cells.length; k++) {
+            uint256 shotBit = uint256(1) << cells[k];
+            ebool shieldBreak = defender.shieldActive ? defender.shieldCellMask.eq(shotBit) : e.asEbool(false);
+            ebool isMine = defender.mineMask.and(shotBit).ne(uint256(0)).and(shieldBreak.not());
+            ebool isShipHit = defender.boardMask.and(shotBit).ne(uint256(0)).and(shieldBreak.not());
+            euint256 normalCode = isMine.select(
+                e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1)))
+            );
+            euint256 code = shieldBreak.select(e.asEuint256(uint256(4)), normalCode);
+
+            packed = packed.or(code.shl(uint256(k) * 3));
+
+            ebool countsAsStruck = shieldBreak.not();
+            struckMask = struckMask.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
         }
+
+        (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckMask);
     }
 
     /// @dev Folds the struck cells into each ship's hit tracking and
@@ -275,104 +310,6 @@ library CiphertideMechanics {
             ebool justSunk = destroyed.and(wasAlreadyDestroyed.not());
             newlyDestroyed = newlyDestroyed.or(justSunk.select(defender.shipMask[i], e.asEuint256(uint256(0))));
         }
-    }
-
-    /// @dev Tries config.attemptsPerCell independent random cells within
-    ///      the area for one slot, avoiding every cell already claimed by
-    ///      an earlier slot this action or already shot on a previous
-    ///      action, keeping the first non-overlapping candidate. Packs the
-    ///      local position and a result code (0 if this slot never found a
-    ///      free candidate or the random count did not reach it, 1 miss, 2
-    ///      ship hit, 3 mine, 4 shield break) into one
-    ///      (config.positionBits + 3) bit value: config.positionBits bits
-    ///      of local position plus a 3 bit code.
-    function _pickAreaSlot(
-        AreaGeometry memory area,
-        uint8 slotIndex,
-        ebool isActive,
-        euint256 avoidSoFar,
-        PlayerSlot storage defender,
-        StrikeConfig memory config
-    ) internal returns (AreaSlotResult memory r) {
-        euint256 localPos;
-        euint256 candidateMask;
-        ebool found;
-        (r.newAvoid, localPos, candidateMask, found) = _findDistinctAreaCell(area, avoidSoFar, config.attemptsPerCell);
-
-        ebool trulyActive = isActive.and(found);
-        // Same shield check as a normal shot, against this slot's candidate
-        // cell instead of a caller-supplied cell index. Whether a shield is
-        // active at all is a plain bool, so the encrypted equality check
-        // only needs to run when one is actually up.
-        ebool shieldBreak =
-            defender.shieldActive ? trulyActive.and(candidateMask.eq(defender.shieldCellMask)) : e.asEbool(false);
-        euint256 code = _areaResultCode(trulyActive, shieldBreak, candidateMask, defender.mineMask, defender.boardMask);
-
-        r.packedSlot = localPos.or(code.shl(uint256(config.positionBits))).shl(
-            uint256(slotIndex) * (uint256(config.positionBits) + 3)
-        );
-        // A broken shield does no damage, exactly like it never happened,
-        // so its contribution to the aggregate struck mask is zeroed here
-        // even though the slot itself was truly active.
-        ebool countsAsStruck = trulyActive.and(shieldBreak.not());
-        r.struckContribution = countsAsStruck.select(candidateMask, e.asEuint256(uint256(0)));
-    }
-
-    /// @dev Runs the bounded-attempt retry to find one cell in the area
-    ///      distinct from every cell in avoidSoFar, split out to keep
-    ///      _pickAreaSlot's stack frame small.
-    function _findDistinctAreaCell(AreaGeometry memory area, euint256 avoidSoFar, uint8 attemptsPerCell)
-        internal
-        returns (euint256 newAvoid, euint256 localPos, euint256 candidateMask, ebool found)
-    {
-        localPos = e.asEuint256(uint256(0));
-        candidateMask = e.asEuint256(uint256(0));
-        found = e.asEbool(false);
-
-        for (uint8 attempt = 0; attempt < attemptsPerCell; attempt++) {
-            euint256 idx = e.randBounded(uint256(area.width) * uint256(area.height));
-            euint256 candidateBit = e.asEuint256(uint256(1)).shl(_localToGlobalCell(idx, area));
-
-            ebool accept = found.not().and(candidateBit.and(avoidSoFar).eq(uint256(0)));
-
-            avoidSoFar = accept.select(avoidSoFar.or(candidateBit), avoidSoFar);
-            localPos = accept.select(idx, localPos);
-            candidateMask = accept.select(candidateBit, candidateMask);
-            found = found.or(accept);
-        }
-        newAvoid = avoidSoFar;
-    }
-
-    /// @dev Classifies one area-strike candidate cell into a result code: 0
-    ///      inactive, 1 miss, 2 ship hit, 3 mine, 4 shield break. A shield
-    ///      break takes priority over every other code: it does not damage
-    ///      the ship and is not a mine (mines and ship cells are disjoint
-    ///      by placement, and the shield only ever guards a ship cell, so
-    ///      this never actually conflicts with the mine code, the check is
-    ///      kept explicit to stay safe either way).
-    function _areaResultCode(
-        ebool trulyActive,
-        ebool shieldBreak,
-        euint256 candidateMask,
-        euint256 mineMask,
-        euint256 boardMask
-    ) internal returns (euint256) {
-        ebool isMine = candidateMask.and(mineMask).ne(uint256(0)).and(shieldBreak.not());
-        ebool isShipHit = candidateMask.and(boardMask).ne(uint256(0)).and(shieldBreak.not());
-        euint256 normalCode =
-            isMine.select(e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1))));
-        euint256 code = shieldBreak.select(e.asEuint256(uint256(4)), normalCode);
-        return trulyActive.select(code, e.asEuint256(uint256(0)));
-    }
-
-    /// @dev area.width is the area's row stride for decoding a local index
-    ///      back into a local row and column, area.height only bounded the
-    ///      random draw that produced localIdx in _findDistinctAreaCell.
-    function _localToGlobalCell(euint256 localIdx, AreaGeometry memory area) internal returns (euint256) {
-        euint256 localRow = localIdx.div(uint256(area.width));
-        euint256 localCol = localIdx.rem(uint256(area.width));
-        return
-            localRow.add(uint256(area.anchorRow)).mul(uint256(BOARD_SIZE)).add(localCol.add(uint256(area.anchorCol)));
     }
 
     // ---------------------------------------------------------------
