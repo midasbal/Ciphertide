@@ -5,19 +5,19 @@ import './styles/global.css'
 import Landing from './screens/Landing.tsx'
 import TopNav from './components/nav/TopNav.tsx'
 
-// Dev-only route for the throwaway game-client proof harness, never
-// linked from the real app. Lazy loaded so its two-private-key wiring
-// never ships in the normal bundle path.
-const DevHarness = lazy(() => import('./dev/harness.tsx'))
-
 // The in-match sample screen, the visual identity's hardest-working
 // screen, rendered with stubbed data, no contract or wallet.
 const MatchScreen = lazy(() => import('./screens/MatchScreen.tsx'))
 
-// The original skill-aiming demo, superseded by the real landing page as
-// the default route but kept reachable at /dev/aiming rather than
-// deleted, since it still exercises the OpponentSeaBoard aiming preview.
-const AimingDemo = lazy(() => import('./App.tsx'))
+// Dev-only routes: the throwaway game-client proof harness (reads the
+// VITE_PLAYER_A/B_PRIVATE_KEY dev keys) and the original skill-aiming
+// demo, never linked from the real app. Guarded by import.meta.env.DEV,
+// a compile-time constant Vite replaces with a literal true or false, so
+// a production build's dead code elimination drops the lazy() call and
+// its dynamic import() entirely, not just the route that would render
+// it: neither chunk, and neither dev key, ends up in a production dist/.
+const DevHarness = import.meta.env.DEV ? lazy(() => import('./dev/harness.tsx')) : null
+const AimingDemo = import.meta.env.DEV ? lazy(() => import('./App.tsx')) : null
 
 // Fleet standings mock, static sample data only, no contract wiring.
 const Leaderboard = lazy(() => import('./screens/Leaderboard.tsx'))
@@ -59,8 +59,8 @@ function Root() {
             <Route path="/leaderboard" element={<Leaderboard />} />
           </Route>
           <Route path="/match/:matchId" element={<MatchScreen />} />
-          <Route path="/dev/aiming" element={<AimingDemo />} />
-          <Route path="/dev/harness" element={<DevHarness />} />
+          {AimingDemo && <Route path="/dev/aiming" element={<AimingDemo />} />}
+          {DevHarness && <Route path="/dev/harness" element={<DevHarness />} />}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>

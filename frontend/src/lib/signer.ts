@@ -26,14 +26,23 @@ function buildSigner(key: Hex): Signer {
  * same browser. It only activates when the param is present, it is never
  * a silent default, so a play-wallet is always the real path once one
  * exists.
+ *
+ * The whole dev-signer branch sits behind import.meta.env.DEV, a
+ * compile-time constant Vite replaces with a literal true or false, so a
+ * production build's dead code elimination drops this entire block,
+ * including the VITE_PLAYER_A_PRIVATE_KEY and VITE_PLAYER_B_PRIVATE_KEY
+ * references themselves, not just their runtime effect. Those two env
+ * vars never reach a production bundle.
  */
 export function getSigner(): Signer | null {
-  const devSlot = new URLSearchParams(window.location.search).get('dev-signer')
-  if (devSlot === 'a' || devSlot === 'b') {
-    const key = (devSlot === 'b' ? import.meta.env.VITE_PLAYER_B_PRIVATE_KEY : import.meta.env.VITE_PLAYER_A_PRIVATE_KEY) as
-      | Hex
-      | undefined
-    if (key) return buildSigner(key)
+  if (import.meta.env.DEV) {
+    const devSlot = new URLSearchParams(window.location.search).get('dev-signer')
+    if (devSlot === 'a' || devSlot === 'b') {
+      const key = (devSlot === 'b' ? import.meta.env.VITE_PLAYER_B_PRIVATE_KEY : import.meta.env.VITE_PLAYER_A_PRIVATE_KEY) as
+        | Hex
+        | undefined
+      if (key) return buildSigner(key)
+    }
   }
 
   const playWalletKey = readPlayWalletKey()
