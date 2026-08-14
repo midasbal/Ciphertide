@@ -656,7 +656,9 @@ export default function MatchScreen() {
 
         <div className="match-column match-column--side">
           <div className="side-panel side-panel--chat">
-            <ChatPanel />
+            {matchId !== null && (
+              <ChatPanel matchId={matchId} myAddress={addresses[myIdx]} opponentAddress={addresses[opponentIdx]} />
+            )}
           </div>
           <div className="side-panel side-panel--skills">
             {phase === 1 && <PlacementView state={placementState} />}
