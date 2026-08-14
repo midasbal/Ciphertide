@@ -64,7 +64,7 @@ for the client side of the reveal-and-confirm flow.
   - **Shield** (starter): seal one of your own cells against the next
     hit that finds it.
   - **Bombardment** (starter): mark a 10x10 zone and strike 15 cells
-    inside it at random. *Temporarily disabled, see Known Limitations.*
+    inside it at random.
   - **Rake** (starter): strike three random cells along a chosen row.
   - **Salvo** (unlockable): name three exact cells and hit all three,
     then forfeit your next turn.
@@ -73,7 +73,6 @@ for the client side of the reveal-and-confirm flow.
   - **Sonar** (shared): sweep a 5x5 area for a yes/no "any ship inside"
     signal, no cells revealed.
   - **Barrage** (shared): strike 4 to 6 random cells inside a 4x4 area.
-    *Temporarily disabled, see Known Limitations.*
 
 ## Architecture
 

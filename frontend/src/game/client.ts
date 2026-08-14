@@ -74,13 +74,12 @@ const nonZero = (h: Hex) => h !== ZERO32
 // proportionally (about 7 million); 9 million leaves the same margin.
 // Derived, not measured, the same as in e2e/run.ts.
 //
-// Bombardment (a fixed 15 cells) and Carpet (always evaluates all 9 of
-// its cells, even on a silent whiff) are deliberately left WITHOUT an
-// override: scaling Barrage's real cost by cell count puts both past the
-// RPC's own per-transaction cap, where a large explicit limit would just
-// get the transaction rejected before it could even be sent, a worse
-// failure than an out-of-gas revert. Both need the contract-side stepped-
-// call treatment placement already got, a separate, larger fix.
+// Bombardment and Carpet are deliberately left WITHOUT an override: both
+// are now stepped on the contract side (BOMBARDMENT_STEP_SIZE and
+// CARPET_STEP_SIZE cells per call), the same treatment placement already
+// got, so each individual useBombardment/useCarpet call resolves only a
+// few cells and stays well under default estimation's reach, exactly
+// like placeMyBoardStep needs no override here either.
 //
 // Sonar and placeShield need no override: neither is a per-cell loop
 // over an area, and a live cast estimate for Sonar against the deployed
@@ -656,18 +655,18 @@ export class CiphertideClient {
   // differ, the same shape e2e/run.ts's useAreaSkillAndConfirm uses.
   // ---------------------------------------------------------------
 
-  private async fireAreaSkill(
+  // Resolves an area skill's already-fired receipt: reveals the packed
+  // per-cell outcome and the win flag, confirms on chain, and decodes
+  // every struck cell. Shared by fireAreaSkill's single-call skills and
+  // fireSteppedAreaSkill's multi-call ones, the only difference between
+  // them being how the firing receipt itself was obtained.
+  private async resolveAreaSkill(
     matchId: MatchId,
-    useFn: string,
-    useArgs: unknown[],
+    receipt: TransactionReceipt,
     firedEvent: string,
     confirmFn: string,
     onProgress?: ProgressCallback,
   ): Promise<AreaSkillOutcome> {
-    onProgress?.('sending')
-    const receipt = await this.write(useFn, useArgs)
-    onProgress?.('mined')
-
     const { cells, packedHandle, allDestroyedHandle } = findEvent(ciphertideAbi, receipt, firedEvent) as {
       cells: readonly number[]
       packedHandle: Hex
@@ -684,12 +683,48 @@ export class CiphertideClient {
     return { cells: outcomes, win: nonZero(win.attestation.value) }
   }
 
+  private async fireAreaSkill(
+    matchId: MatchId,
+    useFn: string,
+    useArgs: unknown[],
+    firedEvent: string,
+    confirmFn: string,
+    onProgress?: ProgressCallback,
+  ): Promise<AreaSkillOutcome> {
+    onProgress?.('sending')
+    const receipt = await this.write(useFn, useArgs)
+    onProgress?.('mined')
+    return this.resolveAreaSkill(matchId, receipt, firedEvent, confirmFn, onProgress)
+  }
+
+  // Bombardment is stepped on the contract side: useBombardment must be
+  // called repeatedly with the exact same matchId, anchorRow and anchorCol
+  // until a receipt carries BombardmentFired instead of
+  // BombardmentStepSubmitted, mirroring placeBoard's own step loop.
+  private async fireSteppedAreaSkill(
+    matchId: MatchId,
+    useFn: string,
+    useArgs: unknown[],
+    firedEvent: string,
+    confirmFn: string,
+    onProgress?: ProgressCallback,
+  ): Promise<AreaSkillOutcome> {
+    let receipt: TransactionReceipt
+    for (;;) {
+      onProgress?.('sending')
+      receipt = await this.write(useFn, useArgs)
+      onProgress?.('mined')
+      if (findEventOrNull(ciphertideAbi, receipt, firedEvent)) break
+    }
+    return this.resolveAreaSkill(matchId, receipt, firedEvent, confirmFn, onProgress)
+  }
+
   async useBarrage(matchId: MatchId, anchorRow: number, anchorCol: number, onProgress?: ProgressCallback): Promise<AreaSkillOutcome> {
     return this.fireAreaSkill(matchId, 'useBarrage', [matchId, anchorRow, anchorCol], 'BarrageFired', 'confirmBarrage', onProgress)
   }
 
   async useBombardment(matchId: MatchId, anchorRow: number, anchorCol: number, onProgress?: ProgressCallback): Promise<AreaSkillOutcome> {
-    return this.fireAreaSkill(
+    return this.fireSteppedAreaSkill(
       matchId,
       'useBombardment',
       [matchId, anchorRow, anchorCol],
@@ -742,10 +777,20 @@ export class CiphertideClient {
   // shield break, exactly like a genuine miss).
   // ---------------------------------------------------------------
 
+  // Carpet is stepped on the contract side too: useCarpet must be called
+  // repeatedly with the exact same matchId, anchorRow and anchorCol until
+  // a receipt carries CarpetFired instead of CarpetStepSubmitted, the same
+  // loop useBombardment's own fireSteppedAreaSkill runs, kept as its own
+  // method here since Carpet's cells are not part of CarpetFired and have
+  // to be recomputed locally from the anchor below.
   async useCarpet(matchId: MatchId, anchorRow: number, anchorCol: number, onProgress?: ProgressCallback): Promise<AreaSkillOutcome> {
-    onProgress?.('sending')
-    const receipt = await this.write('useCarpet', [matchId, anchorRow, anchorCol])
-    onProgress?.('mined')
+    let receipt: TransactionReceipt
+    for (;;) {
+      onProgress?.('sending')
+      receipt = await this.write('useCarpet', [matchId, anchorRow, anchorCol])
+      onProgress?.('mined')
+      if (findEventOrNull(ciphertideAbi, receipt, 'CarpetFired')) break
+    }
 
     const { packedHandle, allDestroyedHandle } = findEvent(ciphertideAbi, receipt, 'CarpetFired') as {
       packedHandle: Hex

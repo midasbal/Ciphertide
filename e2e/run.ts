@@ -93,7 +93,7 @@ if (missingEnv.length > 0) {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function findEvent(receipt: TransactionReceipt, eventName: string) {
+function findEventOrNull(receipt: TransactionReceipt, eventName: string): Record<string, unknown> | null {
   for (const log of receipt.logs) {
     try {
       const decoded = decodeEventLog({
@@ -107,7 +107,13 @@ function findEvent(receipt: TransactionReceipt, eventName: string) {
       // Not this event, keep scanning.
     }
   }
-  throw new Error(`event ${eventName} not found in receipt ${receipt.transactionHash}`);
+  return null;
+}
+
+function findEvent(receipt: TransactionReceipt, eventName: string) {
+  const found = findEventOrNull(receipt, eventName);
+  if (!found) throw new Error(`event ${eventName} not found in receipt ${receipt.transactionHash}`);
+  return found;
 }
 
 // Per-transaction gas record, extended with the player whose wallet sent
@@ -256,19 +262,12 @@ async function main() {
   // for either, and sending a real transaction to measure them directly
   // was avoided to save the limited funded wallets' gas.
   //
-  // Bombardment and Carpet are deliberately left WITHOUT an override.
-  // Bombardment strikes a fixed 15 cells (the heaviest single call in the
-  // game), and Carpet always evaluates all 9 of its cells even on a
-  // silent whiff, since which cells to check cannot depend on whether any
-  // of them will actually hit without leaking that fact. Scaling Barrage's
-  // real 11.85 million by cell count alone puts Bombardment at roughly 35
-  // million and Carpet at roughly 21 million, both past the RPC's own
-  // per-transaction cap: a large explicit limit here would just repeat
-  // the old 60/80 million mistake, an outright rejected send instead of
-  // an out-of-gas revert. Both need the same stepped-call treatment
-  // placement already got (splitting one call into several smaller ones
-  // the RPC will actually broadcast), a separate, larger contract-side fix
-  // this pass does not attempt.
+  // Bombardment and Carpet are also left WITHOUT an override, for the
+  // opposite reason placement needs none: both are now stepped on the
+  // contract side (BOMBARDMENT_STEP_SIZE and CARPET_STEP_SIZE cells per
+  // call), so each individual useBombardment/useCarpet call only resolves
+  // a few cells and stays well under default estimation's reach, exactly
+  // like placeMyBoardStep.
   //
   // Sonar and placeShield need no override: Sonar does one confidential
   // comparison over a single area mask, and placeShield does one
@@ -401,7 +400,7 @@ async function main() {
   const MINES_PER_PLAYER = await readConst("MINES_PER_PLAYER");
   const MINE_PLACEMENT_ATTEMPTS = await readConst("MINE_PLACEMENT_ATTEMPTS");
   const CAPTAIN_BOMBARDMENT = await readConst("CAPTAIN_BOMBARDMENT");
-  const CAPTAIN_RAKE = await readConst("CAPTAIN_RAKE");
+  const CAPTAIN_CARPET = await readConst("CAPTAIN_CARPET");
 
   // Placement is spread across NUM_SHIPS + 1 separate placeMyBoardStep
   // calls, one ship per call, then a final call that places both mines
@@ -534,12 +533,13 @@ async function main() {
     return won;
   }
 
-  // Barrage, Bombardment and Rake now pick their struck cells with public
-  // randomness instead of a confidential draw (see CiphertideMechanics.
-  // pickAreaCells), so none of them take a fee anymore and all three
-  // share this same fire-then-confirm shape, only the function names,
-  // event name and call args (an anchor for Barrage and Bombardment, a
-  // row for Rake) differ.
+  // Barrage and Rake pick their struck cells with public randomness
+  // instead of a confidential draw (see CiphertideMechanics.pickAreaCells),
+  // so neither takes a fee anymore and both share this same single-call
+  // fire-then-confirm shape, only the function names, event name and call
+  // args (an anchor for Barrage, a row for Rake) differ. Bombardment and
+  // Carpet pick their cells the same public way but are stepped, so they
+  // use useSteppedAreaSkillAndConfirm below instead.
   async function useAreaSkillAndConfirm(
     matchId: bigint,
     wallet: typeof walletA,
@@ -572,30 +572,94 @@ async function main() {
     });
   }
 
+  // Bombardment and Carpet are stepped on the contract side: useBombardment
+  // and useCarpet must each be called repeatedly with the exact same
+  // matchId, anchorRow and anchorCol until a receipt carries the fired
+  // event instead of the step event. Each call is still logged through
+  // write() individually, tagged by function name, so the per-step gas
+  // this run measures live comes straight out of gasLog, no separate
+  // bookkeeping needed.
+  async function useSteppedAreaSkillAndConfirm(
+    matchId: bigint,
+    wallet: typeof walletA,
+    label: string,
+    useFn: string,
+    useArgs: unknown[],
+    stepEvent: string,
+    firedEvent: string,
+    confirmFn: string,
+  ): Promise<boolean> {
+    return timed(label, async () => {
+      let receipt: TransactionReceipt;
+      let step = 0;
+      for (;;) {
+        step++;
+        receipt = await write(wallet, useFn, useArgs);
+        const fired = findEventOrNull(receipt, firedEvent);
+        if (fired) {
+          console.log(`${useFn}() step ${step} (final) gas ${receipt.gasUsed}`);
+          break;
+        }
+        const { cellsDone, totalCells } = findEvent(receipt, stepEvent) as { cellsDone: number; totalCells: number };
+        console.log(`${useFn}() step ${step} gas ${receipt.gasUsed} (${cellsDone}/${totalCells} cells)`);
+      }
+      const { packedHandle, allDestroyedHandle } = findEvent(receipt, firedEvent) as {
+        packedHandle: Hex;
+        allDestroyedHandle: Hex;
+      };
+      const [packed, win] = await tightPollReveal(label, [packedHandle, allDestroyedHandle]);
+      const confirmReceipt = await write(wallet, confirmFn, [
+        matchId,
+        packed.attestation,
+        packed.signatures,
+        win.attestation,
+        win.signatures,
+      ]);
+      console.log(
+        `${confirmFn} gas ${confirmReceipt.gasUsed}, packed=${packed.attestation.value}, ` +
+          `win=${nonZero(win.attestation.value)}\n`,
+      );
+      return nonZero(win.attestation.value);
+    });
+  }
+
   const useBarrageAndConfirm = (matchId: bigint, wallet: typeof walletA) =>
     useAreaSkillAndConfirm(matchId, wallet, "useBarrage", "useBarrage", [matchId, 0, 0], "BarrageFired", "confirmBarrage");
   const useBombardmentAndConfirm = (matchId: bigint, wallet: typeof walletA) =>
-    useAreaSkillAndConfirm(
+    useSteppedAreaSkillAndConfirm(
       matchId,
       wallet,
       "useBombardment",
       "useBombardment",
       [matchId, 0, 0],
+      "BombardmentStepSubmitted",
       "BombardmentFired",
       "confirmBombardment",
     );
-  const useRakeAndConfirm = (matchId: bigint, wallet: typeof walletA) =>
-    useAreaSkillAndConfirm(matchId, wallet, "useRake", "useRake", [matchId, 0], "RakeFired", "confirmRake");
+  const useCarpetAndConfirm = (matchId: bigint, wallet: typeof walletA) =>
+    useSteppedAreaSkillAndConfirm(
+      matchId,
+      wallet,
+      "useCarpet",
+      "useCarpet",
+      [matchId, 0, 0],
+      "CarpetStepSubmitted",
+      "CarpetFired",
+      "confirmCarpet",
+    );
 
   // The single 1v1 match. Player A gets captain Bombardment, Player B gets
-  // captain Rake, so both unique skills are available in this one match
-  // alongside the shared Barrage.
-  console.log(`Creating match (Player A captain ${CAPTAIN_BOMBARDMENT}, Player B captain ${CAPTAIN_RAKE})...`);
+  // captain Carpet, so this run exercises both newly stepped skills in one
+  // match, the real proof a mock cannot give: that useBombardment and
+  // useCarpet each fire their full step sequence and confirm against the
+  // live Base Sepolia deployment, with real measured per-step gas under
+  // the chain's per-transaction cap.
+  console.log(`Creating match (Player A captain ${CAPTAIN_BOMBARDMENT}, Player B captain ${CAPTAIN_CARPET})...`);
   const createReceipt = await write(walletA, "createMatch", [CAPTAIN_BOMBARDMENT]);
   const { matchId } = findEvent(createReceipt, "MatchCreated") as { matchId: bigint };
   console.log(`Match ${matchId}, gas ${createReceipt.gasUsed}\n`);
 
-  await write(walletB, "joinMatch", [matchId, CAPTAIN_RAKE]);
+  await write(walletB, "joinMatch", [matchId, CAPTAIN_CARPET]);
   const addr0 = (await read("getPlayerAddress", [matchId, 0])) as Hex;
   if (addr0.toLowerCase() !== accountA.address.toLowerCase()) {
     throw new Error("player index assignment did not match the assumed A=0, B=1 convention");
@@ -630,15 +694,15 @@ async function main() {
   }
 
   let bombardmentDone = false;
-  let rakeDone = false;
-  for (let i = 0; i < 4 && !finished && (!bombardmentDone || !rakeDone); i++) {
+  let carpetDone = false;
+  for (let i = 0; i < 4 && !finished && (!bombardmentDone || !carpetDone); i++) {
     actorIdx = await currentActorIdx();
     if (actorIdx === 0 && !bombardmentDone) {
       finished = await useBombardmentAndConfirm(matchId, walletA);
       bombardmentDone = true;
-    } else if (actorIdx === 1 && !rakeDone) {
-      finished = await useRakeAndConfirm(matchId, walletB);
-      rakeDone = true;
+    } else if (actorIdx === 1 && !carpetDone) {
+      finished = await useCarpetAndConfirm(matchId, walletB);
+      carpetDone = true;
     } else {
       // Turn landed on the captain whose unique skill is already used
       // (a mine bonus can do this): spend it on a plain miss so the turn
@@ -654,7 +718,7 @@ async function main() {
 
   await logBalances("Balances after the match");
 
-  console.log("Placement (both players, all steps), dice roll, a shot, Barrage, Bombardment and Rake each");
+  console.log("Placement (both players, all steps), dice roll, a shot, Barrage, Bombardment and Carpet each");
   console.log("completed their action-and-confirm cycle using only handles fetched from events and public");
   console.log("getters, the same way a real client has to.\n");
 

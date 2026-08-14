@@ -10,12 +10,12 @@ import SkillsPanel, { type SkillEntry } from '../components/match/SkillsPanel'
 import ChatPanel from '../components/match/ChatPanel'
 import { getGameClient } from '../lib/gameClient'
 import { getSigner } from '../lib/signer'
-import { BARRAGE_AREA_SIZE, BOARD_SIZE, SALVO_CELL_COUNT, SONAR_AREA_SIZE, clampAnchor } from '../lib/boardConstants'
+import { BARRAGE_AREA_SIZE, BOARD_SIZE, BOMBARDMENT_AREA_SIZE, CARPET_AREA_SIZE, SALVO_CELL_COUNT, SONAR_AREA_SIZE, clampAnchor } from '../lib/boardConstants'
 import { CAPTAINS } from './captains'
 import { PHASE_NAMES, type ActionStage, type AreaSkillOutcome, type CellOutcome, type MatchId, type PlayerIdx } from '../game'
 import './MatchScreen.css'
 
-type SkillMode = 'shoot' | 'sonar' | 'barrage' | 'rake' | 'salvo' | 'shield'
+type SkillMode = 'shoot' | 'sonar' | 'barrage' | 'rake' | 'salvo' | 'shield' | 'bombardment' | 'carpet'
 
 type ActionState = { kind: 'idle' } | { kind: 'busy'; label: string; stage: ActionStage; detail?: string } | { kind: 'error'; message: string }
 
@@ -350,11 +350,15 @@ export default function MatchScreen() {
     const read =
       myCaptainId === 1
         ? client.hasShieldCharge(matchId, myIdx)
-        : myCaptainId === 3
-          ? client.hasRakeCharge(matchId, myIdx)
-          : myCaptainId === 4
-            ? client.hasSalvoCharge(matchId, myIdx)
-            : null
+        : myCaptainId === 2
+          ? client.hasBombardmentCharge(matchId, myIdx)
+          : myCaptainId === 3
+            ? client.hasRakeCharge(matchId, myIdx)
+            : myCaptainId === 4
+              ? client.hasSalvoCharge(matchId, myIdx)
+              : myCaptainId === 5
+                ? client.hasCarpetCharge(matchId, myIdx)
+                : null
     if (!read) return
     read.then((has) => setCharges((c) => ({ ...c, unique: has }))).catch(() => {})
   }, [phase, myIdx, matchId, captainIds, actionState])
@@ -441,6 +445,26 @@ export default function MatchScreen() {
       await runAction('Rake', async (onProgress) => {
         const outcome = await client.useRake(matchId, row, onProgress)
         applyAreaOutcome(outcome, `RAKE ROW ${row + 1}`)
+      })
+      return
+    }
+
+    if (activeSkill === 'bombardment') {
+      const anchorRow = clampAnchor(row, BOMBARDMENT_AREA_SIZE)
+      const anchorCol = clampAnchor(col, BOMBARDMENT_AREA_SIZE)
+      await runAction('Bombardment', async (onProgress) => {
+        const outcome = await client.useBombardment(matchId, anchorRow, anchorCol, onProgress)
+        applyAreaOutcome(outcome, 'BOMBARDMENT')
+      })
+      return
+    }
+
+    if (activeSkill === 'carpet') {
+      const anchorRow = clampAnchor(row, CARPET_AREA_SIZE)
+      const anchorCol = clampAnchor(col, CARPET_AREA_SIZE)
+      await runAction('Carpet', async (onProgress) => {
+        const outcome = await client.useCarpet(matchId, anchorRow, anchorCol, onProgress)
+        applyAreaOutcome(outcome, 'CARPET')
       })
       return
     }
@@ -577,19 +601,14 @@ export default function MatchScreen() {
       const captainId = myCaptain.id
       if (captainId === 1) {
         skills.push({ id: 'shield', label: 'Shield', description: 'Seal one of your own cells against the next hit.', usable: charges.unique, used: !charges.unique })
+      } else if (captainId === 2) {
+        skills.push({ id: 'bombardment', label: 'Bombardment', description: 'Mark a 10x10 zone and strike fifteen cells inside it at random.', usable: charges.unique, used: !charges.unique })
       } else if (captainId === 3) {
         skills.push({ id: 'rake', label: 'Rake', description: 'Strike three random cells along a chosen row.', usable: charges.unique, used: !charges.unique })
       } else if (captainId === 4) {
         skills.push({ id: 'salvo', label: 'Salvo', description: 'Name three exact cells and hit all three.', usable: charges.unique, used: !charges.unique })
-      } else {
-        skills.push({
-          id: myCaptain.mark,
-          label: myCaptain.skillName,
-          description: myCaptain.description,
-          usable: false,
-          used: false,
-          unavailableReason: 'Exceeds the chain gas cap right now, disabled until it is split into steps.',
-        })
+      } else if (captainId === 5) {
+        skills.push({ id: 'carpet', label: 'Carpet', description: 'Strike a 3x3 block, and only leave a mark if a ship sits inside it.', usable: charges.unique, used: !charges.unique })
       }
     }
   }
