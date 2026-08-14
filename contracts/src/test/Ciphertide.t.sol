@@ -189,6 +189,27 @@ contract CiphertideTest is IncoTest {
         code = (packedValue >> (uint256(slotIndex) * 3)) & 0x7;
     }
 
+    function _confirmPendingCarpet(uint256 matchId, address requester) internal returns (uint256 packedValue) {
+        (bytes32 packedHandle, bytes32 allDestroyedHandle) = game.getPendingAreaHandles(matchId);
+        (DecryptionAttestation memory packedAtt, bytes[] memory packedSigs) =
+            getDecryptionAttestation(requester, HandleWithProof({handle: packedHandle, proof: _emptyAllowanceProof()}));
+        (DecryptionAttestation memory winAtt, bytes[] memory winSigs) = getDecryptionAttestation(
+            requester, HandleWithProof({handle: allDestroyedHandle, proof: _emptyAllowanceProof()})
+        );
+        game.confirmCarpet(matchId, packedAtt, packedSigs, winAtt, winSigs);
+        packedValue = uint256(packedAtt.value);
+    }
+
+    /// @dev Decodes one carpet slot (3 bit result code only, no local
+    /// position needed: the same reasoning as _decodeSalvoSlot, the 9
+    /// cells a firing carpet struck are always the whole 3x3, fully known
+    /// from the anchor alone), mirroring CiphertideMechanics.resolveCarpetStrike.
+    /// Local slot order is row major within the 3x3: slot k is
+    /// (anchorRow + k / 3, anchorCol + k % 3).
+    function _decodeCarpetSlot(uint256 packedValue, uint8 slotIndex) internal pure returns (uint256 code) {
+        code = (packedValue >> (uint256(slotIndex) * 3)) & 0x7;
+    }
+
     /// @dev Decodes one area-strike slot (positionBits bits of local
     /// position, 3 bit result code: 0 inactive, 1 miss, 2 ship hit, 3 mine,
     /// 4 shield break) from a packed value, mirroring the contract's own
@@ -1985,6 +2006,275 @@ contract CiphertideTest is IncoTest {
 
         vm.prank(bob);
         game.shoot(matchId, 3);
+        processAllOperations();
+        (bool hit, bool shieldBreak) = _confirmPendingShot(matchId, bob);
+
+        assertTrue(hit, "the cell should now resolve as a real hit, the shield is already gone");
+        assertFalse(shieldBreak, "the shield cannot break twice");
+    }
+
+    // Carpet: Captain 5's unique skill. Neither alice nor bob is
+    // CAPTAIN_CARPET in _createAndJoinMatch, so these tests declare their
+    // own captains via _setupInProgressMatchWithCaptains. The 3x3 anchor is
+    // a direct public choice, and its trigger (any ship cell inside) is
+    // deterministic from the known board layout, so every one of these
+    // tests is fully deterministic, no retry loop across fresh matches is
+    // needed anywhere below. _setupInProgressMatchWithCaptains always gives
+    // player index 1 (bob, when bob is p1) the tiny ships board, cells 0-5
+    // are real single-cell ships in row 0 and everything else is water,
+    // regardless of the board0 argument, which only ever seeds player
+    // index 0.
+
+    /// @dev Anchor (0, 0) covers cells 0, 1, 2 (row 0), 15, 16, 17 (row 1)
+    /// and 30, 31, 32 (row 2) on the tiny ships board: cells 0, 1, 2 are
+    /// real ships, the other 6 are water. Ships 3, 4, 5 sit just outside
+    /// the 3x3 (column 3 is past the anchor's 3 wide span) and must stay
+    /// untouched. Carpet needs no fee (useCarpet is not payable): the area
+    /// is a public choice, and every op resolveCarpetStrike uses (and, eq,
+    /// ne, select, or, shl) is free, exactly like Sonar and Salvo.
+    function testCarpetStrikesAllNineCellsWhenShipPresentAndLeavesOutsideShipsUntouched() public {
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, carpetCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
+
+        vm.prank(alice);
+        game.useCarpet(matchId, 0, 0);
+        processAllOperations();
+        uint256 packed = _confirmPendingCarpet(matchId, alice);
+
+        assertEq(_decodeCarpetSlot(packed, 0), 2, "cell 0 is a real ship, should resolve as a hit");
+        assertEq(_decodeCarpetSlot(packed, 1), 2, "cell 1 is a real ship, should resolve as a hit");
+        assertEq(_decodeCarpetSlot(packed, 2), 2, "cell 2 is a real ship, should resolve as a hit");
+        assertEq(_decodeCarpetSlot(packed, 3), 1, "cell 15 is water, should resolve as a miss");
+        assertEq(_decodeCarpetSlot(packed, 4), 1, "cell 16 is water, should resolve as a miss");
+        assertEq(_decodeCarpetSlot(packed, 5), 1, "cell 17 is water, should resolve as a miss");
+        assertEq(_decodeCarpetSlot(packed, 6), 1, "cell 30 is water, should resolve as a miss");
+        assertEq(_decodeCarpetSlot(packed, 7), 1, "cell 31 is water, should resolve as a miss");
+        assertEq(_decodeCarpetSlot(packed, 8), 1, "cell 32 is water, should resolve as a miss");
+
+        uint256 shotsAgainstBob = game.getShotsAgainst(matchId, bobIdx);
+        assertEq(
+            shotsAgainstBob & ((uint256(1) << 3) | (uint256(1) << 4) | (uint256(1) << 5)),
+            0,
+            "ships 3, 4 and 5 sit just outside the 3x3 and must stay untouched"
+        );
+    }
+
+    function testCarpetGasUsage() public {
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, carpetCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        vm.prank(alice);
+        uint256 gasBefore = gasleft();
+        game.useCarpet(matchId, 0, 0);
+        uint256 gasUsed = gasBefore - gasleft();
+        console.log("useCarpet() gas used (9 fixed cells, no random draws):", gasUsed);
+    }
+
+    /// @dev Anchor (10, 10) covers cells 160, 161, 162, 175, 176, 177, 190,
+    /// 191 and 192, all water on the tiny ships board (ships only occupy
+    /// row 0, cells 0-5), so no ship cell lies inside: a silent whiff. No
+    /// cell is struck, nothing is logged, and a later normal shot on one of
+    /// those cells still resolves as an ordinary miss rather than
+    /// reverting on an already-shot cell.
+    function testCarpetWhiffsSilentlyWhenNoShipInsideAndLaterShotStillWorks() public {
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, carpetCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
+
+        vm.prank(alice);
+        game.useCarpet(matchId, 10, 10);
+        processAllOperations();
+        uint256 packed = _confirmPendingCarpet(matchId, alice);
+
+        assertEq(packed, 0, "no ship inside the area, every slot should stay inactive");
+        assertEq(game.getShotsAgainst(matchId, bobIdx), 0, "a whiff must log nothing at all");
+        assertEq(game.getTurn(matchId), bob, "carpet is the whole action for the turn, it should pass even on a whiff");
+
+        // Hand the turn back to alice, then a normal shot on one of the
+        // whiffed cells must succeed, proving it was never logged.
+        _passTurnWithMiss(matchId, bob, 220);
+        vm.prank(alice);
+        game.shoot(matchId, 160);
+        processAllOperations();
+        (bool hit,) = _confirmPendingShot(matchId, alice);
+        assertFalse(hit, "cell 160 is water, the whiffed carpet left it untouched and unshot");
+    }
+
+    function testCarpetConsumesChargeAndPassesTurn() public {
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, carpetCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 aliceIdx = game.getPlayerAddress(matchId, 0) == alice ? 0 : 1;
+
+        vm.prank(alice);
+        game.useCarpet(matchId, 0, 0);
+        processAllOperations();
+        _confirmPendingCarpet(matchId, alice);
+
+        assertEq(game.getTurn(matchId), bob, "carpet is the whole action for the turn, it should pass");
+        assertFalse(game.hasCarpetCharge(matchId, aliceIdx), "carpet's single charge should now be spent");
+
+        _passTurnWithMiss(matchId, bob, 210);
+        assertEq(game.getTurn(matchId), alice);
+
+        vm.prank(alice);
+        vm.expectRevert("carpet already used");
+        game.useCarpet(matchId, 5, 5);
+    }
+
+    function testOnlyCaptainCarpetCanUseIt() public {
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
+        // alice is CAPTAIN_SHIELD and bob is CAPTAIN_BOMBARDMENT in
+        // _createAndJoinMatch, neither is carpet.
+        address turnPlayer = game.getTurn(matchId);
+
+        vm.prank(turnPlayer);
+        vm.expectRevert("captain does not own this skill");
+        game.useCarpet(matchId, 0, 0);
+    }
+
+    function testCarpetRevertsWhenAreaDoesNotFit() public {
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, carpetCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        // BOARD_SIZE is 15, so an anchor row of 13 puts the 3x3's last row
+        // at 15, one past the last valid row (0-14).
+        vm.prank(alice);
+        vm.expectRevert("carpet area does not fit on the board");
+        game.useCarpet(matchId, 13, 0);
+    }
+
+    /// @dev Sinks 5 of the tiny ships board's six single-cell ships (0-4)
+    /// with plain shots, keeping the turn on every hit, then aims the
+    /// carpet's 3x3 at anchor (0, 3), covering cells 3, 4, 5, 18, 19, 20,
+    /// 33, 34 and 35: ships 3 and 4 are already sunk (hitting them again is
+    /// a harmless no-op), and cell 5 is the last remaining ship.
+    function testCarpetCanSinkShipAndWin() public {
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board1, uint256[6] memory ships1) = _tinyShipsBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, carpetCaptain, shieldCaptain, board1, ships1);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        for (uint8 cell = 0; cell < 5; cell++) {
+            vm.prank(alice);
+            game.shoot(matchId, cell);
+            processAllOperations();
+            _confirmPendingShot(matchId, alice);
+        }
+        assertEq(game.getTurn(matchId), alice, "five hits in a row should keep alice's turn");
+
+        vm.prank(alice);
+        game.useCarpet(matchId, 0, 3);
+        processAllOperations();
+        _confirmPendingCarpet(matchId, alice);
+
+        assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.Finished));
+        assertEq(game.getWinner(matchId), alice, "alice should win once the last ship cell is struck by the carpet");
+    }
+
+    /// @dev Seeds a real mine at cell 16 (row 1, col 1, local slot 4), water
+    /// inside a carpet anchored at (0, 0) that also has ships present at
+    /// cells 0, 1 and 2, and confirms exactly one bonus action is granted,
+    /// the same no-stacking rule the other multi-cell skills use.
+    function testCarpetMinePenaltyGrantsExactlyOneBonus() public {
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, carpetCaptain, shieldCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+        uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
+        game.setMinesForTesting(matchId, bobIdx, uint256(1) << 16, bob);
+        processAllOperations();
+
+        vm.prank(alice);
+        game.useCarpet(matchId, 0, 0);
+        processAllOperations();
+        uint256 packed = _confirmPendingCarpet(matchId, alice);
+
+        assertEq(_decodeCarpetSlot(packed, 0), 2, "cell 0 is a real ship, should resolve as a hit");
+        assertEq(_decodeCarpetSlot(packed, 4), 3, "cell 16 is the seeded mine, should resolve as code 3");
+        assertTrue(game.hasBonusShot(matchId, bobIdx), "striking a mine should grant its owner exactly one bonus");
+    }
+
+    /// @dev A carpet that strikes the shielded cell breaks it exactly once
+    /// (no damage, cell survives, shield consumed), mirroring the other
+    /// multi-cell skills' shield break tests. The shield sits on cell 1
+    /// (row 0, col 1, local slot 1) inside a carpet anchored at (0, 0).
+    function testCarpetBreaksShieldOnceWithoutDestroyingShip() public {
+        uint8 shieldCaptain = game.CAPTAIN_SHIELD();
+        uint8 carpetCaptain = game.CAPTAIN_CARPET();
+        (uint256 board0, uint256[6] memory ships0) = _tinyShipsBoard();
+        uint256 matchId =
+            _setupInProgressMatchWithCaptains(alice, bob, shieldCaptain, carpetCaptain, board0, ships0);
+        if (game.getTurn(matchId) != alice) {
+            _passTurnWithMiss(matchId, bob, 200);
+        }
+
+        _placeShield(matchId, alice, 1);
+        processAllOperations();
+
+        // Hand the turn to bob so he can fire the carpet at alice's board.
+        // Cell 100 is water on both test boards.
+        _passTurnWithMiss(matchId, alice, 100);
+
+        vm.prank(bob);
+        game.useCarpet(matchId, 0, 0);
+        processAllOperations();
+        uint256 packed = _confirmPendingCarpet(matchId, bob);
+
+        assertEq(_decodeCarpetSlot(packed, 0), 2, "cell 0 is a real ship, should resolve as a hit");
+        assertEq(_decodeCarpetSlot(packed, 1), 4, "the shielded cell should resolve as a shield break");
+        assertEq(_decodeCarpetSlot(packed, 2), 2, "cell 2 is a real ship, should resolve as a hit");
+        assertFalse(game.isShieldActive(matchId, 0), "the shield should be consumed by the carpet break");
+
+        uint256 revealed = getUint256Value(game.getLastDestroyedMask(matchId, 0));
+        assertEq(revealed & (uint256(1) << 1), 0, "the shield break must not sink the ship it is guarding");
+        assertEq(game.getShotsAgainst(matchId, 0) & (uint256(1) << 1), 0, "a shield break must not burn the cell");
+
+        assertEq(game.getTurn(matchId), alice, "carpet is the whole action for the turn, it should pass");
+        _passTurnWithMiss(matchId, alice, 101);
+        assertEq(game.getTurn(matchId), bob, "turn should have passed back to bob");
+
+        vm.prank(bob);
+        game.shoot(matchId, 1);
         processAllOperations();
         (bool hit, bool shieldBreak) = _confirmPendingShot(matchId, bob);
 

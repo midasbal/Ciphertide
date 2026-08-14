@@ -31,6 +31,7 @@ struct PlayerSlot {
     bool bombardmentUsed; // gates useBombardment to once per match, captain 2 only
     bool rakeUsed; // gates useRake to once per match, captain 3 only
     bool salvoUsed; // gates useSalvo to once per match, captain 4 only
+    bool carpetUsed; // gates useCarpet to once per match, captain 5 only
     bool shieldUsed; // gates placeShield to once per match, captain 1 only
     // Set on the salvo user once useSalvo resolves, Salvo's forfeit cost.
     // Consumed the next time the turn would land on this player: that turn

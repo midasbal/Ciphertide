@@ -98,6 +98,16 @@ contract Ciphertide {
     /// free. Costs the user their next turn instead: see PlayerSlot.skipNextTurn.
     uint8 public constant SALVO_CELL_COUNT = 3;
 
+    /// Carpet: Captain 5's unique skill, a caller chosen 3x3 area. Unlike
+    /// every other skill, whether it strikes at all is conditional: all 9
+    /// cells are struck only if at least one of the opponent's ship cells
+    /// lies inside the 3x3, otherwise nothing is struck and nothing is
+    /// logged, a silent whiff. The area is a public choice and the trigger
+    /// check is a single free comparison, no random draws, so like Sonar
+    /// and Salvo, Carpet needs no fee.
+    uint8 public constant CARPET_AREA_SIZE = 3;
+    uint8 public constant CARPET_CELL_COUNT = 9;
+
     /// Captain identity, declared per player when entering a match. Every
     /// captain carries the two shared skills, Sonar and Barrage, plus one
     /// unique skill. This contract only records which captain a player
@@ -130,7 +140,8 @@ contract Ciphertide {
         Barrage,
         Bombardment,
         Rake,
-        Salvo
+        Salvo,
+        Carpet
     }
 
     struct Match {
@@ -150,14 +161,15 @@ contract Ciphertide {
         ebool pendingMineHit; // shot only
         ebool pendingShieldBreak; // shot only
         ebool pendingSonarResult; // sonar only
-        // Shared by barrage, bombardment, rake and salvo (never more than
-        // one at once, gated by pendingAction), the per-slot bit width and
-        // encoding differs between the area skills and salvo, see
-        // CiphertideMechanics.resolveAreaStrikes and resolveChosenStrikes.
+        // Shared by barrage, bombardment, rake, salvo and carpet (never
+        // more than one at once, gated by pendingAction), the per-slot bit
+        // width and encoding differs between the area skills and salvo,
+        // see CiphertideMechanics.resolveAreaStrikes, resolveChosenStrikes
+        // and resolveCarpetStrike.
         euint256 pendingAreaPacked;
         ebool pendingAreaAllDestroyed;
-        uint8 pendingAreaAnchorRow; // barrage, bombardment, rake only
-        uint8 pendingAreaAnchorCol; // barrage, bombardment, rake only
+        uint8 pendingAreaAnchorRow; // barrage, bombardment, rake, carpet only
+        uint8 pendingAreaAnchorCol; // barrage, bombardment, rake, carpet only
         uint8[3] pendingSalvoCells; // salvo only
     }
 
@@ -217,6 +229,15 @@ contract Ciphertide {
         bytes32 allDestroyedHandle
     );
     event SalvoResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
+    event CarpetFired(
+        uint256 indexed matchId,
+        address indexed player,
+        uint8 anchorRow,
+        uint8 anchorCol,
+        bytes32 packedHandle,
+        bytes32 allDestroyedHandle
+    );
+    event CarpetResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
     event ShieldPlaced(uint256 indexed matchId, address indexed player);
     event ShieldBroken(uint256 indexed matchId, address indexed owner, uint8 cell);
     event MatchWon(uint256 indexed matchId, address indexed winner);
@@ -1488,6 +1509,128 @@ contract Ciphertide {
         _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
 
+    /// @notice Captain Carpet's unique skill: aims a 3x3 area, striking all
+    ///         9 cells at once only if at least one of the opponent's ship
+    ///         cells lies inside it, ship cells outside the 3x3 are
+    ///         untouched. If no ship cell is inside, nothing is struck,
+    ///         nothing is logged, a silent whiff. Otherwise resolves like
+    ///         the other multi-cell skills: ship hits burn cells and can
+    ///         sink ships, a struck mine still applies its penalty, and a
+    ///         struck cell that is the defender's shielded cell resolves as
+    ///         a shield break instead (no damage, the cell survives, the
+    ///         shield is consumed). Single use per match, and the player's
+    ///         whole action for the turn regardless of whether it triggers.
+    /// @dev The 3x3 is a public choice and its trigger check is a single
+    ///      free comparison, no random draws, so like Sonar and Salvo this
+    ///      needs no fee.
+    function useCarpet(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external onlyPlayer(matchId) {
+        Match storage m = matches[matchId];
+        _beginAction(m);
+        _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_CARPET);
+        require(
+            uint256(anchorRow) + CARPET_AREA_SIZE <= BOARD_SIZE && uint256(anchorCol) + CARPET_AREA_SIZE <= BOARD_SIZE,
+            "carpet area does not fit on the board"
+        );
+
+        PlayerSlot storage attacker = m.players[m.turn];
+        require(!attacker.carpetUsed, "carpet already used");
+        attacker.carpetUsed = true;
+
+        PlayerSlot storage defender = m.players[1 - m.turn];
+        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveCarpetStrike(
+            CiphertideMechanics.AreaGeometry({
+                anchorRow: anchorRow,
+                anchorCol: anchorCol,
+                width: CARPET_AREA_SIZE,
+                height: CARPET_AREA_SIZE
+            }),
+            defender
+        );
+        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
+        m.pendingAreaAnchorRow = anchorRow;
+        m.pendingAreaAnchorCol = anchorCol;
+
+        m.pendingAction = PendingAction.Carpet;
+
+        emit CarpetFired(matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
+    }
+
+    /// @dev Decodes carpet's packed slots (3 bits per cell, 9 fixed cells
+    ///      in anchor row-major order, no local position bits needed, the
+    ///      same reasoning as _applySalvoResults: the caller already knows
+    ///      every cell a firing carpet struck, from the anchor alone),
+    ///      marks every active slot's cell as shot except a shield break,
+    ///      and emits per-cell results. Returns whether any struck cell was
+    ///      a mine. On a whiff every slot's code is 0, so this loop never
+    ///      marks or emits anything, exactly the silent-whiff behavior.
+    function _applyCarpetResults(
+        uint256 matchId,
+        PlayerSlot storage defender,
+        uint256 packed,
+        uint8 anchorRow,
+        uint8 anchorCol
+    ) internal returns (bool anyMineTriggered) {
+        for (uint8 k = 0; k < CARPET_CELL_COUNT; k++) {
+            uint256 code = (packed >> (uint256(k) * 3)) & 0x7;
+            if (code == 0) continue;
+
+            uint8 globalCell =
+                uint8((uint256(k) / CARPET_AREA_SIZE + anchorRow) * BOARD_SIZE + (uint256(k) % CARPET_AREA_SIZE + anchorCol));
+            if (code == 4) {
+                defender.shieldActive = false;
+                emit ShieldBroken(matchId, defender.addr, globalCell);
+            } else {
+                defender.shotsAgainstMe |= (uint256(1) << globalCell);
+            }
+            if (code == 3) {
+                anyMineTriggered = true;
+            }
+            emit CarpetResolved(matchId, globalCell, code == 2, code == 3, code == 4);
+        }
+    }
+
+    /// @notice Confirms a pending carpet: marks every struck cell as shot
+    ///         (none at all, on a whiff), applies the single non-stacking
+    ///         mine bonus if any struck cell was a mine, resolves a shield
+    ///         break if the defender's shielded cell was among them, and
+    ///         resolves the win or turn pass. Carpet is the player's whole
+    ///         action for the turn, whether or not it triggered.
+    function confirmCarpet(
+        uint256 matchId,
+        DecryptionAttestation memory packedAttestation,
+        bytes[] memory packedSignatures,
+        DecryptionAttestation memory allDestroyedAttestation,
+        bytes[] memory allDestroyedSignatures
+    ) external {
+        Match storage m = matches[matchId];
+        require(m.pendingAction == PendingAction.Carpet, "no pending carpet");
+        uint256 packedValue = uint256(
+            _verifyAttestation(
+                euint256.unwrap(m.pendingAreaPacked),
+                packedAttestation,
+                packedSignatures,
+                "invalid carpet attestation",
+                "carpet handle mismatch"
+            )
+        );
+        bool won = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingAreaAllDestroyed),
+                allDestroyedAttestation,
+                allDestroyedSignatures,
+                "invalid win attestation",
+                "win handle mismatch"
+            )
+        );
+
+        uint8 actorIdx = m.pendingActor;
+        PlayerSlot storage defender = m.players[1 - actorIdx];
+        bool anyMineTriggered =
+            _applyCarpetResults(matchId, defender, packedValue, m.pendingAreaAnchorRow, m.pendingAreaAnchorCol);
+
+        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
+    }
+
     function claimTimeout(uint256 matchId) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         require(m.phase == Phase.InProgress, "match not in progress");
@@ -1573,6 +1716,10 @@ contract Ciphertide {
 
     function hasSalvoCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
         return !matches[matchId].players[playerIdx].salvoUsed;
+    }
+
+    function hasCarpetCharge(uint256 matchId, uint8 playerIdx) external view returns (bool) {
+        return !matches[matchId].players[playerIdx].carpetUsed;
     }
 
     function getShieldCellHandle(uint256 matchId, uint8 playerIdx) external view returns (euint256) {

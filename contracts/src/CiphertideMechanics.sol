@@ -45,6 +45,14 @@ library CiphertideMechanics {
     ///      arithmetic, no encrypted values involved, since the area itself
     ///      is a public choice, only its contents are confidential.
     function rectMask(uint8 row0, uint8 col0, uint8 height, uint8 width) external pure returns (uint256 mask) {
+        return _rectMaskPlain(row0, col0, height, width);
+    }
+
+    /// @dev Shared plaintext computation behind rectMask, also used by
+    ///      resolveCarpetStrike to test whether any ship cell lies inside
+    ///      its 3x3 area without needing a self call back into this same
+    ///      library's own external rectMask.
+    function _rectMaskPlain(uint8 row0, uint8 col0, uint8 height, uint8 width) internal pure returns (uint256 mask) {
         uint256 rowRun = (uint256(1) << width) - 1;
         for (uint8 r = 0; r < height; r++) {
             mask |= rowRun << ((uint256(row0) + r) * BOARD_SIZE + col0);
@@ -405,6 +413,66 @@ library CiphertideMechanics {
             packed = packed.or(code.shl(uint256(k) * 3));
 
             ebool countsAsStruck = shieldBreak.not();
+            struckMask = struckMask.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
+        }
+
+        (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckMask);
+    }
+
+    // ---------------------------------------------------------------
+    // Carpet: Captain 5's unique skill. The 3x3 area is a public choice
+    // like the other skills' aim, but whether it strikes at all is
+    // conditional on encrypted board state: a single "any ship cell
+    // inside the area" ebool, computed once and used to gate all 9 fixed
+    // local slots at once, obliviously (a select, never a branch on the
+    // encrypted result). No random draws and no per slot avoid-collision
+    // search are needed, unlike Barrage, Bombardment and Rake: every
+    // slot's cell is fixed by the anchor, not drawn. Packs one 3 bit
+    // result code per cell (0 inactive, 1 miss, 2 ship hit, 3 mine, 4
+    // shield break, the same codes resolveAreaStrikes and
+    // resolveChosenStrikes use), 9 slots, no local position bits needed:
+    // like Salvo, the caller already knows every cell a firing carpet
+    // struck, from the anchor alone.
+    // ---------------------------------------------------------------
+
+    /// @dev area.width and area.height are always 3 for Carpet, checked by
+    ///      the caller before this runs; kept as AreaGeometry fields
+    ///      purely to reuse _rectMaskPlain rather than hardcoding 3 twice.
+    ///      shipPresent gates every one of the 9 slots identically: when
+    ///      it is false every slot's code stays 0 (inactive) regardless of
+    ///      what actually occupies each cell, so a whiff's packed result
+    ///      decodes to nothing struck and nothing logged, with no separate
+    ///      reveal of the trigger itself needed, the silent whiff falls
+    ///      straight out of the same packing and apply path every other
+    ///      multi-cell skill already uses.
+    function resolveCarpetStrike(AreaGeometry memory area, PlayerSlot storage defender)
+        external
+        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
+    {
+        uint256 areaMaskPlain = _rectMaskPlain(area.anchorRow, area.anchorCol, area.height, area.width);
+        ebool shipPresent = defender.boardMask.and(areaMaskPlain).ne(uint256(0));
+
+        euint256 struckMask = e.asEuint256(uint256(0));
+        packed = e.asEuint256(uint256(0));
+
+        for (uint8 localPos = 0; localPos < 9; localPos++) {
+            uint256 globalCell = (uint256(area.anchorRow) + localPos / area.width) * BOARD_SIZE
+                + (uint256(area.anchorCol) + localPos % area.width);
+            uint256 shotBit = uint256(1) << globalCell;
+
+            ebool shieldBreak =
+                defender.shieldActive ? shipPresent.and(defender.shieldCellMask.eq(shotBit)) : e.asEbool(false);
+            ebool isMine = shipPresent.and(defender.mineMask.and(shotBit).ne(uint256(0))).and(shieldBreak.not());
+            ebool isShipHit = shipPresent.and(defender.boardMask.and(shotBit).ne(uint256(0))).and(shieldBreak.not());
+            euint256 normalCode = isMine.select(
+                e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1)))
+            );
+            euint256 code =
+                shipPresent.select(shieldBreak.select(e.asEuint256(uint256(4)), normalCode), e.asEuint256(uint256(0)));
+
+            packed = packed.or(code.shl(uint256(localPos) * 3));
+
+            ebool countsAsStruck = shipPresent.and(shieldBreak.not());
             struckMask = struckMask.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
         }
 
