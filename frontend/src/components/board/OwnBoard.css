@@ -1,4 +1,35 @@
+.own-board-stage {
+  position: relative;
+}
+
+/* The hull layer sits below the grid: opaque cells still hide it outside
+ * a ship's footprint, and per-cell damage/struck marks (painted by the
+ * cell buttons themselves, on top) still read clearly over it. */
+.own-board-hulls {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.ship-hull-body {
+  fill: var(--ct-color-structure);
+  stroke: var(--ct-border-live);
+  stroke-width: 0.045;
+  stroke-opacity: 0.55;
+}
+
+.ship-hull-bridge {
+  fill: var(--ct-bg-well);
+  stroke: rgba(231, 238, 254, 0.22);
+  stroke-width: 0.03;
+}
+
 .own-board {
+  position: relative;
+  z-index: 1;
   display: grid;
   gap: 1px;
   background: var(--ct-border-faint);
@@ -29,8 +60,7 @@
 }
 
 .own-cell--hull {
-  background: var(--ct-color-structure);
-  box-shadow: inset 0 0 0 1px rgba(231, 238, 254, 0.12);
+  background: transparent;
 }
 
 .own-cell--struck {
