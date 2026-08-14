@@ -277,7 +277,7 @@ contract Ciphertide {
 
         uint256 totalDraws =
             uint256(NUM_SHIPS) * PLACEMENT_ATTEMPTS_PER_SHIP + uint256(MINES_PER_PLAYER) * MINE_PLACEMENT_ATTEMPTS;
-        require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
+        _requireFee(totalDraws);
 
         _runPlacement(matchId, playerIdx, e.asEuint256(uint256(0)));
     }
@@ -346,6 +346,30 @@ contract Ciphertide {
         emit PlacementSubmitted(matchId, msg.sender, ebool.unwrap(allPlaced));
     }
 
+    /// @dev Shared covalidator attestation check used by every confirm*
+    ///      function: verifies the attestation's signatures against the
+    ///      given invalid-attestation message, requires its handle to match
+    ///      the given pending handle against the given mismatch message,
+    ///      then returns the attested value for the caller to decode
+    ///      (asBool for an ebool pending value, or a plain uint256 cast for
+    ///      a euint256 one). Factored out purely to shrink the contract's
+    ///      deployed bytecode: with a low optimizer run count a helper
+    ///      called from many sites is emitted once instead of inlined at
+    ///      every call site. Every revert message a caller passes in is
+    ///      exactly the message that call site used before this helper
+    ///      existed.
+    function _verifyAttestation(
+        bytes32 pendingHandle,
+        DecryptionAttestation memory attestation,
+        bytes[] memory signatures,
+        string memory invalidMessage,
+        string memory mismatchMessage
+    ) internal view returns (bytes32 value) {
+        require(inco.incoVerifier().isValidDecryptionAttestation(attestation, signatures), invalidMessage);
+        require(pendingHandle == attestation.handle, mismatchMessage);
+        value = attestation.value;
+    }
+
     /// @notice Confirms a submitted placement, or leaves it unplaced so the
     ///         player can retry, based on the covalidator-attested allPlaced
     ///         bit. Only that single bit is ever attested, never the layout.
@@ -363,14 +387,16 @@ contract Ciphertide {
         Match storage m = matches[matchId];
         PlayerSlot storage p = m.players[playerIdx];
         require(p.placementPending, "no pending placement");
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(allPlacedAttestation, allPlacedSignatures),
-            "invalid placement attestation"
+        bytes32 attestedValue = _verifyAttestation(
+            ebool.unwrap(p.pendingAllPlaced),
+            allPlacedAttestation,
+            allPlacedSignatures,
+            "invalid placement attestation",
+            "placement handle mismatch"
         );
-        require(ebool.unwrap(p.pendingAllPlaced) == allPlacedAttestation.handle, "placement handle mismatch");
 
         p.placementPending = false;
-        bool allPlaced = asBool(allPlacedAttestation.value);
+        bool allPlaced = asBool(attestedValue);
 
         if (allPlaced) {
             p.placed = true;
@@ -449,7 +475,7 @@ contract Ciphertide {
     function rollDice(uint256 matchId) external payable onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         require(m.phase == Phase.AwaitingDiceRoll, "not ready for dice roll");
-        require(msg.value >= inco.getFee() * 2, "fee not paid");
+        _requireFee(2);
 
         euint256 a = e.randBounded(uint256(6)).add(uint256(1));
         euint256 b = e.randBounded(uint256(6)).add(uint256(1));
@@ -477,19 +503,16 @@ contract Ciphertide {
     ) external {
         Match storage m = matches[matchId];
         require(m.dicePending, "no pending dice roll");
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(rollAAttestation, rollASignatures),
-            "invalid rollA attestation"
+        uint256 rollA = uint256(
+            _verifyAttestation(
+                euint256.unwrap(m.rollA), rollAAttestation, rollASignatures, "invalid rollA attestation", "rollA handle mismatch"
+            )
         );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(rollBAttestation, rollBSignatures),
-            "invalid rollB attestation"
+        uint256 rollB = uint256(
+            _verifyAttestation(
+                euint256.unwrap(m.rollB), rollBAttestation, rollBSignatures, "invalid rollB attestation", "rollB handle mismatch"
+            )
         );
-        require(euint256.unwrap(m.rollA) == rollAAttestation.handle, "rollA handle mismatch");
-        require(euint256.unwrap(m.rollB) == rollBAttestation.handle, "rollB handle mismatch");
-
-        uint256 rollA = uint256(rollAAttestation.value);
-        uint256 rollB = uint256(rollBAttestation.value);
         m.dicePending = false;
 
         if (rollA == rollB) {
@@ -505,6 +528,15 @@ contract Ciphertide {
         m.players[1].remainingTime = TIME_BUDGET_SECONDS;
         m.phase = Phase.InProgress;
         emit GameStarted(matchId, m.players[m.turn].addr);
+    }
+
+    /// @dev Shared fee check for every action that spends random draws
+    ///      (placement, dice, shield, barrage, bombardment, rake): draws is
+    ///      the number of randBounded/rand calls the action is about to
+    ///      make, each costing inco.getFee(). Sonar and Salvo make no
+    ///      random draws and so never call this.
+    function _requireFee(uint256 draws) internal view {
+        require(msg.value >= inco.getFee() * draws, "fee not paid");
     }
 
     /// @dev Shared preamble for any player action (shoot, sonar, barrage):
@@ -580,7 +612,7 @@ contract Ciphertide {
         require(!p.shieldUsed, "shield already used");
         p.shieldUsed = true;
 
-        require(msg.value >= inco.getFee(), "fee not paid");
+        _requireFee(1);
         euint256 cellMask = e.newEuint256(shieldCellInput, msg.sender);
 
         ebool isValidPick = _isSingleOwnShipCell(cellMask, p.boardMask);
@@ -722,36 +754,40 @@ contract Ciphertide {
     ) external {
         Match storage m = matches[matchId];
         require(m.pendingAction == PendingAction.Shot, "no pending shot");
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(hitAttestation, hitSignatures), "invalid hit attestation"
+        bool hit = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingHit), hitAttestation, hitSignatures, "invalid hit attestation", "hit handle mismatch"
+            )
         );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
-            "invalid win attestation"
+        bool won = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingAllDestroyed),
+                allDestroyedAttestation,
+                allDestroyedSignatures,
+                "invalid win attestation",
+                "win handle mismatch"
+            )
         );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(mineHitAttestation, mineHitSignatures),
-            "invalid mine attestation"
+        bool mineHit = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingMineHit),
+                mineHitAttestation,
+                mineHitSignatures,
+                "invalid mine attestation",
+                "mine handle mismatch"
+            )
         );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(shieldBreakAttestation, shieldBreakSignatures),
-            "invalid shield break attestation"
-        );
-        require(ebool.unwrap(m.pendingHit) == hitAttestation.handle, "hit handle mismatch");
-        require(ebool.unwrap(m.pendingAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
-        require(ebool.unwrap(m.pendingMineHit) == mineHitAttestation.handle, "mine handle mismatch");
-        require(
-            ebool.unwrap(m.pendingShieldBreak) == shieldBreakAttestation.handle, "shield break handle mismatch"
+        bool shieldBreak = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingShieldBreak),
+                shieldBreakAttestation,
+                shieldBreakSignatures,
+                "invalid shield break attestation",
+                "shield break handle mismatch"
+            )
         );
 
-        _resolveShotOutcome(
-            matchId,
-            m,
-            asBool(hitAttestation.value),
-            asBool(allDestroyedAttestation.value),
-            asBool(mineHitAttestation.value),
-            asBool(shieldBreakAttestation.value)
-        );
+        _resolveShotOutcome(matchId, m, hit, won, mineHit, shieldBreak);
     }
 
     /// @dev Applies a confirmed shot's plaintext outcome: logging, the mine
@@ -855,12 +891,14 @@ contract Ciphertide {
     {
         Match storage m = matches[matchId];
         require(m.pendingAction == PendingAction.Sonar, "no pending sonar");
-        require(inco.incoVerifier().isValidDecryptionAttestation(attestation, signatures), "invalid sonar attestation");
-        require(ebool.unwrap(m.pendingSonarResult) == attestation.handle, "sonar handle mismatch");
+        bool anyShip = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingSonarResult), attestation, signatures, "invalid sonar attestation", "sonar handle mismatch"
+            )
+        );
 
         m.pendingAction = PendingAction.None;
         uint8 actor = m.pendingActor;
-        bool anyShip = asBool(attestation.value);
 
         // Sonar is the player's whole action for the turn: it always ends
         // the turn afterward, except a pending bonus action from an
@@ -908,7 +946,7 @@ contract Ciphertide {
         attacker.barrageUsed = true;
 
         uint256 totalDraws = uint256(1) + uint256(BARRAGE_MAX_CELLS) * BARRAGE_ATTEMPTS_PER_CELL;
-        require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
+        _requireFee(totalDraws);
 
         PlayerSlot storage defender = m.players[1 - m.turn];
         (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
@@ -966,7 +1004,7 @@ contract Ciphertide {
         attacker.bombardmentUsed = true;
 
         uint256 totalDraws = uint256(1) + uint256(BOMBARDMENT_STRIKE_COUNT) * BOMBARDMENT_ATTEMPTS_PER_CELL;
-        require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
+        _requireFee(totalDraws);
 
         PlayerSlot storage defender = m.players[1 - m.turn];
         (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
@@ -1019,7 +1057,7 @@ contract Ciphertide {
         attacker.rakeUsed = true;
 
         uint256 totalDraws = uint256(1) + uint256(RAKE_STRIKE_COUNT) * RAKE_ATTEMPTS_PER_CELL;
-        require(msg.value >= inco.getFee() * totalDraws, "fee not paid");
+        _requireFee(totalDraws);
 
         PlayerSlot storage defender = m.players[1 - m.turn];
         (euint256 packed,, ebool allDestroyed) = _fireAreaStrike(
@@ -1177,6 +1215,68 @@ contract Ciphertide {
     ///      one action, both attest as code 3, but the bonus flag below is
     ///      only ever set to true, never incremented, so the owner still
     ///      gets exactly one extra action, not two.
+    /// @dev Shared confirm-step body for Barrage, Bombardment and Rake:
+    ///      verifies both attestations (the win handle check reuses the
+    ///      same "invalid win attestation" / "win handle mismatch" messages
+    ///      every one of them already used, only the packed value's
+    ///      messages and area shape differ per skill), decodes and applies
+    ///      the results through _applyAreaResults, and finishes through
+    ///      _finishAreaAction. Salvo is close to this shape but not quite
+    ///      it (it decodes through _applySalvoResults instead, and sets its
+    ///      own skipNextTurn flag before finishing), so it keeps its own
+    ///      confirmSalvo body rather than being folded in here.
+    function _confirmAreaStrike(
+        uint256 matchId,
+        PendingAction expectedAction,
+        DecryptionAttestation memory packedAttestation,
+        bytes[] memory packedSignatures,
+        DecryptionAttestation memory allDestroyedAttestation,
+        bytes[] memory allDestroyedSignatures,
+        string memory noPendingMessage,
+        string memory invalidPackedMessage,
+        string memory packedMismatchMessage,
+        uint8 width,
+        uint8 maxCells,
+        uint8 positionBits
+    ) internal {
+        Match storage m = matches[matchId];
+        require(m.pendingAction == expectedAction, noPendingMessage);
+        uint256 packedValue = uint256(
+            _verifyAttestation(
+                euint256.unwrap(m.pendingAreaPacked),
+                packedAttestation,
+                packedSignatures,
+                invalidPackedMessage,
+                packedMismatchMessage
+            )
+        );
+        bool won = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingAreaAllDestroyed),
+                allDestroyedAttestation,
+                allDestroyedSignatures,
+                "invalid win attestation",
+                "win handle mismatch"
+            )
+        );
+
+        uint8 actorIdx = m.pendingActor;
+        PlayerSlot storage defender = m.players[1 - actorIdx];
+        bool anyMineTriggered = _applyAreaResults(
+            matchId,
+            defender,
+            packedValue,
+            m.pendingAreaAnchorRow,
+            m.pendingAreaAnchorCol,
+            width,
+            maxCells,
+            positionBits,
+            expectedAction
+        );
+
+        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
+    }
+
     function confirmBarrage(
         uint256 matchId,
         DecryptionAttestation memory packedAttestation,
@@ -1184,35 +1284,20 @@ contract Ciphertide {
         DecryptionAttestation memory allDestroyedAttestation,
         bytes[] memory allDestroyedSignatures
     ) external {
-        Match storage m = matches[matchId];
-        require(m.pendingAction == PendingAction.Barrage, "no pending barrage");
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
-            "invalid barrage attestation"
-        );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
-            "invalid win attestation"
-        );
-        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "barrage handle mismatch");
-        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
-
-        uint8 actorIdx = m.pendingActor;
-        PlayerSlot storage defender = m.players[1 - actorIdx];
-        bool won = asBool(allDestroyedAttestation.value);
-        bool anyMineTriggered = _applyAreaResults(
+        _confirmAreaStrike(
             matchId,
-            defender,
-            uint256(packedAttestation.value),
-            m.pendingAreaAnchorRow,
-            m.pendingAreaAnchorCol,
+            PendingAction.Barrage,
+            packedAttestation,
+            packedSignatures,
+            allDestroyedAttestation,
+            allDestroyedSignatures,
+            "no pending barrage",
+            "invalid barrage attestation",
+            "barrage handle mismatch",
             BARRAGE_AREA_SIZE,
             BARRAGE_MAX_CELLS,
-            BARRAGE_LOCAL_POS_BITS,
-            PendingAction.Barrage
+            BARRAGE_LOCAL_POS_BITS
         );
-
-        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
 
     /// @notice Confirms a pending bombardment: marks every struck cell as
@@ -1232,35 +1317,20 @@ contract Ciphertide {
         DecryptionAttestation memory allDestroyedAttestation,
         bytes[] memory allDestroyedSignatures
     ) external {
-        Match storage m = matches[matchId];
-        require(m.pendingAction == PendingAction.Bombardment, "no pending bombardment");
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
-            "invalid bombardment attestation"
-        );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
-            "invalid win attestation"
-        );
-        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "bombardment handle mismatch");
-        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
-
-        uint8 actorIdx = m.pendingActor;
-        PlayerSlot storage defender = m.players[1 - actorIdx];
-        bool won = asBool(allDestroyedAttestation.value);
-        bool anyMineTriggered = _applyAreaResults(
+        _confirmAreaStrike(
             matchId,
-            defender,
-            uint256(packedAttestation.value),
-            m.pendingAreaAnchorRow,
-            m.pendingAreaAnchorCol,
+            PendingAction.Bombardment,
+            packedAttestation,
+            packedSignatures,
+            allDestroyedAttestation,
+            allDestroyedSignatures,
+            "no pending bombardment",
+            "invalid bombardment attestation",
+            "bombardment handle mismatch",
             BOMBARDMENT_AREA_SIZE,
             BOMBARDMENT_STRIKE_COUNT,
-            BOMBARDMENT_LOCAL_POS_BITS,
-            PendingAction.Bombardment
+            BOMBARDMENT_LOCAL_POS_BITS
         );
-
-        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
 
     /// @notice Confirms a pending rake: marks every struck cell as shot,
@@ -1281,35 +1351,20 @@ contract Ciphertide {
         DecryptionAttestation memory allDestroyedAttestation,
         bytes[] memory allDestroyedSignatures
     ) external {
-        Match storage m = matches[matchId];
-        require(m.pendingAction == PendingAction.Rake, "no pending rake");
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
-            "invalid rake attestation"
-        );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
-            "invalid win attestation"
-        );
-        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "rake handle mismatch");
-        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
-
-        uint8 actorIdx = m.pendingActor;
-        PlayerSlot storage defender = m.players[1 - actorIdx];
-        bool won = asBool(allDestroyedAttestation.value);
-        bool anyMineTriggered = _applyAreaResults(
+        _confirmAreaStrike(
             matchId,
-            defender,
-            uint256(packedAttestation.value),
-            m.pendingAreaAnchorRow,
-            m.pendingAreaAnchorCol,
+            PendingAction.Rake,
+            packedAttestation,
+            packedSignatures,
+            allDestroyedAttestation,
+            allDestroyedSignatures,
+            "no pending rake",
+            "invalid rake attestation",
+            "rake handle mismatch",
             RAKE_ROW_LENGTH,
             RAKE_STRIKE_COUNT,
-            RAKE_LOCAL_POS_BITS,
-            PendingAction.Rake
+            RAKE_LOCAL_POS_BITS
         );
-
-        _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
 
     /// @notice Captain Salvo's unique skill: strikes 3 caller chosen cells
@@ -1404,22 +1459,28 @@ contract Ciphertide {
     ) external {
         Match storage m = matches[matchId];
         require(m.pendingAction == PendingAction.Salvo, "no pending salvo");
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(packedAttestation, packedSignatures),
-            "invalid salvo attestation"
+        uint256 packedValue = uint256(
+            _verifyAttestation(
+                euint256.unwrap(m.pendingAreaPacked),
+                packedAttestation,
+                packedSignatures,
+                "invalid salvo attestation",
+                "salvo handle mismatch"
+            )
         );
-        require(
-            inco.incoVerifier().isValidDecryptionAttestation(allDestroyedAttestation, allDestroyedSignatures),
-            "invalid win attestation"
+        bool won = asBool(
+            _verifyAttestation(
+                ebool.unwrap(m.pendingAreaAllDestroyed),
+                allDestroyedAttestation,
+                allDestroyedSignatures,
+                "invalid win attestation",
+                "win handle mismatch"
+            )
         );
-        require(euint256.unwrap(m.pendingAreaPacked) == packedAttestation.handle, "salvo handle mismatch");
-        require(ebool.unwrap(m.pendingAreaAllDestroyed) == allDestroyedAttestation.handle, "win handle mismatch");
 
         uint8 actorIdx = m.pendingActor;
         PlayerSlot storage defender = m.players[1 - actorIdx];
-        bool won = asBool(allDestroyedAttestation.value);
-        bool anyMineTriggered =
-            _applySalvoResults(matchId, defender, uint256(packedAttestation.value), m.pendingSalvoCells);
+        bool anyMineTriggered = _applySalvoResults(matchId, defender, packedValue, m.pendingSalvoCells);
 
         if (!won) {
             m.players[actorIdx].skipNextTurn = true;
