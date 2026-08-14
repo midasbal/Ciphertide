@@ -90,20 +90,6 @@ export default function Profile() {
     <div className="profile">
       <div className="ct-scanlines" aria-hidden="true" />
 
-      <header className="profile-nav">
-        <a className="profile-nav-mark" href="/">
-          <span className="profile-nav-glyph" aria-hidden="true">
-            &#8225;
-          </span>
-          <span>CIPHERTIDE</span>
-        </a>
-        <nav className="profile-nav-links ct-mono" aria-label="Primary">
-          <a href="/">Home</a>
-          <a href="/?screen=leaderboard">Leaderboard</a>
-          <a href="/?screen=match">Console</a>
-        </nav>
-      </header>
-
       <main className="profile-main">
         <div className="profile-console-frame">
           <span className="profile-corner profile-corner--tl" aria-hidden="true" />

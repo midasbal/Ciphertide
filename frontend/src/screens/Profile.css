@@ -6,57 +6,6 @@
 }
 
 /* ---------------------------------------------------------------
- * Nav
- * --------------------------------------------------------------- */
-
-.profile-nav {
-  position: relative;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  max-width: 82rem;
-  margin: 0 auto;
-  width: 100%;
-  padding: var(--ct-space-5) var(--ct-space-6);
-}
-
-.profile-nav-mark {
-  display: flex;
-  align-items: baseline;
-  gap: var(--ct-space-2);
-  font-family: var(--ct-font-display);
-  font-weight: 600;
-  font-size: var(--ct-text-md);
-  letter-spacing: var(--ct-tracking-widest);
-  color: var(--ct-text-primary);
-  text-decoration: none;
-}
-
-.profile-nav-glyph {
-  color: var(--ct-accent);
-  text-shadow: 0 0 14px var(--ct-accent-soft);
-}
-
-.profile-nav-links {
-  display: flex;
-  gap: var(--ct-space-6);
-  font-size: var(--ct-text-xs);
-  letter-spacing: var(--ct-tracking-wider);
-  text-transform: uppercase;
-}
-
-.profile-nav-links a {
-  color: var(--ct-text-secondary);
-  text-decoration: none;
-  transition: color var(--ct-duration-standard) var(--ct-ease-standard);
-}
-
-.profile-nav-links a:hover {
-  color: var(--ct-accent-bright);
-}
-
-/* ---------------------------------------------------------------
  * Main and the console frame
  * --------------------------------------------------------------- */
 

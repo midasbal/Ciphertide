@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import SonarBackdrop from '../components/hero/SonarBackdrop'
 import Reveal from '../components/reveal/Reveal'
 import { getGameClient } from '../lib/gameClient'
@@ -21,10 +22,6 @@ function getSelectedCaptainId(): number {
   } catch {
     return DEFAULT_CAPTAIN_ID
   }
-}
-
-function goToMatch(matchId: MatchId) {
-  window.location.assign(`/?screen=match&matchId=${matchId}`)
 }
 
 const SIGNER_UNAVAILABLE_MESSAGE =
@@ -62,6 +59,7 @@ function describeJoinFailure(err: unknown): string {
  * be unavailable right now.
  */
 export default function Lobby() {
+  const navigate = useNavigate()
   const [hostState, setHostState] = useState<HostState>({ status: 'idle' })
   const [joinCode, setJoinCode] = useState('')
   const [joinState, setJoinState] = useState<JoinState>({ status: 'idle' })
@@ -80,7 +78,7 @@ export default function Lobby() {
       try {
         const phase = await client.getPhase(matchId)
         if (!cancelled && phase !== 0 /* WaitingForOpponent */) {
-          goToMatch(matchId)
+          navigate(`/match/${matchId}`)
         }
       } catch {
         // A transient read error, the next tick tries again.
@@ -92,7 +90,7 @@ export default function Lobby() {
       cancelled = true
       window.clearInterval(id)
     }
-  }, [hostState])
+  }, [hostState, navigate])
 
   async function handleCreate() {
     setHostState({ status: 'creating' })
@@ -154,7 +152,7 @@ export default function Lobby() {
       }
 
       await client.joinMatch(parsed.matchId, getSelectedCaptainId())
-      goToMatch(parsed.matchId)
+      navigate(`/match/${parsed.matchId}`)
     } catch (err) {
       setJoinState({ status: 'error', message: describeJoinFailure(err) })
     }
@@ -163,20 +161,6 @@ export default function Lobby() {
   return (
     <div className="lobby">
       <div className="ct-scanlines" aria-hidden="true" />
-
-      <header className="lobby-nav">
-        <a className="lobby-nav-mark" href="/">
-          <span className="lobby-nav-glyph" aria-hidden="true">
-            &#8225;
-          </span>
-          <span>CIPHERTIDE</span>
-        </a>
-        <nav className="lobby-nav-links ct-mono" aria-label="Primary">
-          <a href="/">Home</a>
-          <a href="/?screen=profile">Profile</a>
-          <a href="/?screen=leaderboard">Leaderboard</a>
-        </nav>
-      </header>
 
       <main className="lobby-main">
         <div className="lobby-console-frame">

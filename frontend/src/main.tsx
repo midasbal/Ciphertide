@@ -1,87 +1,66 @@
 import { StrictMode, lazy, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
+import { BrowserRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import './styles/global.css'
 import Landing from './screens/Landing.tsx'
+import TopNav from './components/nav/TopNav.tsx'
 
 // Dev-only route for the throwaway game-client proof harness, never
-// linked from the real app. Visit /?harness=1 to reach it. Lazy loaded
-// so its two-private-key wiring never ships in the normal bundle path.
-const params = new URLSearchParams(window.location.search)
-const isHarness = params.has('harness')
+// linked from the real app. Lazy loaded so its two-private-key wiring
+// never ships in the normal bundle path.
+const DevHarness = lazy(() => import('./dev/harness.tsx'))
 
-// Dev-only route for the in-match sample screen, the visual identity's
-// hardest-working screen, rendered with stubbed data, no contract or
-// wallet. Visit /?screen=match to reach it.
-const isMatchSample = params.get('screen') === 'match'
+// The in-match sample screen, the visual identity's hardest-working
+// screen, rendered with stubbed data, no contract or wallet.
+const MatchScreen = lazy(() => import('./screens/MatchScreen.tsx'))
 
 // The original skill-aiming demo, superseded by the real landing page as
-// the default route but kept reachable at /?screen=aiming rather than
+// the default route but kept reachable at /dev/aiming rather than
 // deleted, since it still exercises the OpponentSeaBoard aiming preview.
-const isAimingDemo = params.get('screen') === 'aiming'
+const AimingDemo = lazy(() => import('./App.tsx'))
 
 // Fleet standings mock, static sample data only, no contract wiring.
-// Visit /?screen=leaderboard to reach it.
-const isLeaderboard = params.get('screen') === 'leaderboard'
+const Leaderboard = lazy(() => import('./screens/Leaderboard.tsx'))
 
 // Captain select, off-chain profile state kept in localStorage, no
-// contract wiring. Visit /?screen=profile to reach it.
-const isProfile = params.get('screen') === 'profile'
+// contract wiring.
+const Profile = lazy(() => import('./screens/Profile.tsx'))
 
 // Matchmaking lobby: create or join a real match through the deployed
-// contract. Visit /?screen=lobby to reach it.
-const isLobby = params.get('screen') === 'lobby'
-
-const DevHarness = lazy(() => import('./dev/harness.tsx'))
-const MatchScreen = lazy(() => import('./screens/MatchScreen.tsx'))
-const AimingDemo = lazy(() => import('./App.tsx'))
-const Leaderboard = lazy(() => import('./screens/Leaderboard.tsx'))
-const Profile = lazy(() => import('./screens/Profile.tsx'))
+// contract.
 const Lobby = lazy(() => import('./screens/Lobby.tsx'))
 
+// Shared layout for the main, user-facing routes: the persistent top
+// nav plus whichever page is active. The match and dev routes render
+// their own header instead and sit outside this layout.
+function MainLayout() {
+  return (
+    <>
+      <TopNav />
+      <Outlet />
+    </>
+  )
+}
+
 function Root() {
-  if (isHarness) {
-    return (
+  return (
+    <BrowserRouter>
       <Suspense fallback={null}>
-        <DevHarness />
+        <Routes>
+          <Route element={<MainLayout />}>
+            <Route path="/" element={<Landing />} />
+            <Route path="/play" element={<Lobby />} />
+            <Route path="/profile" element={<Profile />} />
+            <Route path="/leaderboard" element={<Leaderboard />} />
+          </Route>
+          <Route path="/match/:matchId" element={<MatchScreen />} />
+          <Route path="/dev/aiming" element={<AimingDemo />} />
+          <Route path="/dev/harness" element={<DevHarness />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </Suspense>
-    )
-  }
-  if (isMatchSample) {
-    return (
-      <Suspense fallback={null}>
-        <MatchScreen />
-      </Suspense>
-    )
-  }
-  if (isAimingDemo) {
-    return (
-      <Suspense fallback={null}>
-        <AimingDemo />
-      </Suspense>
-    )
-  }
-  if (isLeaderboard) {
-    return (
-      <Suspense fallback={null}>
-        <Leaderboard />
-      </Suspense>
-    )
-  }
-  if (isProfile) {
-    return (
-      <Suspense fallback={null}>
-        <Profile />
-      </Suspense>
-    )
-  }
-  if (isLobby) {
-    return (
-      <Suspense fallback={null}>
-        <Lobby />
-      </Suspense>
-    )
-  }
-  return <Landing />
+    </BrowserRouter>
+  )
 }
 
 createRoot(document.getElementById('root')!).render(

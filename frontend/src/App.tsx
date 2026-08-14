@@ -15,7 +15,7 @@ function App() {
       <p>
         A confidential onchain naval duel on Base Sepolia, built with Inco Lightning. Wallet and live contract
         wiring are not implemented yet, this demonstrates the Sonar and Barrage aiming preview only. See the visual
-        identity sample at <code>/?screen=match</code>.
+        identity sample at <code>/match/1</code>.
       </p>
       <p>Select a skill, then hover the opponent's sea to preview the area it would cover before committing.</p>
       <OpponentSeaBoard onUseSkill={handleUseSkill} />

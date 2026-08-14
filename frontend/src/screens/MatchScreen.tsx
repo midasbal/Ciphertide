@@ -1,3 +1,4 @@
+import { useParams } from 'react-router-dom'
 import DecryptReadout from '../components/cipher/DecryptReadout'
 import OwnBoard from '../components/board/OwnBoard'
 import EnemyBoard from '../components/board/EnemyBoard'
@@ -19,10 +20,13 @@ const LOG_LINES = [
 /**
  * The in-match view, Ciphertide's identity working hardest: your own
  * decrypted waters on one side, the enemy's encrypted fog of war on the
- * other, a live shot resolving in real time. Static mockup, stubbed
- * data, no contract or wallet, purely to lock the visual language.
+ * other, a live shot resolving in real time. The board and skill data
+ * here is still a static mockup, no contract or wallet reads yet, only
+ * the match id in the header comes from the real route.
  */
 export default function MatchScreen() {
+  const { matchId } = useParams<{ matchId: string }>()
+
   return (
     <div className="match-screen">
       <div className="ct-scanlines" aria-hidden="true" />
@@ -36,7 +40,7 @@ export default function MatchScreen() {
         </div>
         <div className="console-header-meta ct-mono">
           <span className="ct-label">MATCH</span>
-          <span>0x4C2F&hellip;19A0</span>
+          <span>{matchId}</span>
         </div>
       </header>
 

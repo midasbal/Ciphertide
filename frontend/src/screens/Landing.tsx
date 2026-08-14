@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import SonarBackdrop from '../components/hero/SonarBackdrop'
 import Reveal from '../components/reveal/Reveal'
 import CipherCell from '../components/cipher/CipherCell'
@@ -40,7 +41,7 @@ const PROCESS_STEPS: Array<{
 ]
 
 const FOOTER_LINKS = [
-  { label: 'Profile', href: '/?screen=profile', external: false },
+  { label: 'Profile', href: '/profile', external: false },
   { label: 'Docs', href: 'https://docs.inco.org', external: true },
   { label: 'GitHub', href: 'https://github.com/midasbal/Ciphertide', external: true },
   { label: 'Inco', href: 'https://inco.org', external: true },
@@ -68,23 +69,6 @@ export default function Landing() {
         Skip to content
       </a>
 
-      <header className="landing-nav">
-        <div className="landing-nav-mark">
-          <span className="landing-nav-glyph" aria-hidden="true">
-            &#8225;
-          </span>
-          <span>CIPHERTIDE</span>
-        </div>
-        <nav className="landing-nav-links ct-mono" aria-label="Primary">
-          <a href="#hook">Brief</a>
-          <a href="#how">Protocol</a>
-          <a href="#captains">Captains</a>
-          <a href="/?screen=profile">Profile</a>
-          <a href="/?screen=lobby">Play</a>
-          <a href="/?screen=match">Console</a>
-        </nav>
-      </header>
-
       <section className="landing-hero">
         <SonarBackdrop />
         <div className="landing-hero-content">
@@ -100,9 +84,9 @@ export default function Landing() {
             shot forces a single cell to speak. Built on Base, sealed by Inco.
           </p>
           <div className="landing-hero-actions">
-            <a className="landing-cta landing-cta--primary" href="/?screen=lobby">
+            <Link className="landing-cta landing-cta--primary" to="/play">
               Deploy Your Fleet
-            </a>
+            </Link>
             <a className="landing-cta landing-cta--ghost" href="#how">
               How it holds
             </a>
@@ -194,9 +178,9 @@ export default function Landing() {
             <p className="landing-section-lede">
               Your waters are waiting. Nobody else can see them, not until you decide who gets to.
             </p>
-            <a className="landing-cta landing-cta--primary landing-cta--large" href="/?screen=lobby">
+            <Link className="landing-cta landing-cta--primary landing-cta--large" to="/play">
               Deploy Your Fleet
-            </a>
+            </Link>
           </div>
         </Reveal>
       </main>
@@ -210,11 +194,17 @@ export default function Landing() {
             <span>CIPHERTIDE</span>
           </div>
           <nav className="landing-footer-links ct-mono" aria-label="Footer">
-            {FOOTER_LINKS.map((link) => (
-              <a key={link.label} href={link.href} target={link.external ? '_blank' : undefined} rel="noreferrer">
-                {link.label}
-              </a>
-            ))}
+            {FOOTER_LINKS.map((link) =>
+              link.external ? (
+                <a key={link.label} href={link.href} target="_blank" rel="noreferrer">
+                  {link.label}
+                </a>
+              ) : (
+                <Link key={link.label} to={link.href}>
+                  {link.label}
+                </Link>
+              ),
+            )}
           </nav>
         </div>
         <div className="landing-footer-bottom ct-mono">

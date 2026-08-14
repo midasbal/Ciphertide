@@ -20,19 +20,6 @@ export default function Leaderboard() {
     <div className="leaderboard">
       <div className="ct-scanlines" aria-hidden="true" />
 
-      <header className="leaderboard-nav">
-        <a className="leaderboard-nav-mark" href="/">
-          <span className="leaderboard-nav-glyph" aria-hidden="true">
-            &#8225;
-          </span>
-          <span>CIPHERTIDE</span>
-        </a>
-        <nav className="leaderboard-nav-links ct-mono" aria-label="Primary">
-          <a href="/">Home</a>
-          <a href="/?screen=match">Console</a>
-        </nav>
-      </header>
-
       <main className="leaderboard-main">
         <div className="leaderboard-console-frame">
           <span className="console-corner console-corner--tl" aria-hidden="true" />
