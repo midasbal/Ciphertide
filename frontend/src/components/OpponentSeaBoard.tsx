@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { BOARD_SIZE, SKILL_AREA_SIZE, type SkillId } from '../lib/boardConstants'
+import { BOARD_SIZE, SKILL_AREA_SIZE, clampAnchor, type SkillId } from '../lib/boardConstants'
 import './OpponentSeaBoard.css'
 
 type SkillCharges = Record<SkillId, number>
@@ -18,12 +18,6 @@ interface OpponentSeaBoardProps {
    * contract's useSonar/useBarrage expect.
    */
   onUseSkill?: (skill: SkillId, anchorRow: number, anchorCol: number) => void
-}
-
-/** Clamps a hovered/clicked cell into a valid top-left anchor so the full
- * areaSize x areaSize block always fits on the board. */
-function clampAnchor(cell: number, areaSize: number): number {
-  return Math.min(Math.max(cell, 0), BOARD_SIZE - areaSize)
 }
 
 export default function OpponentSeaBoard({

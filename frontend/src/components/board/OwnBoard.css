@@ -9,10 +9,23 @@
 }
 
 .own-cell {
+  appearance: none;
   width: 100%;
   aspect-ratio: 1 / 1;
   background: var(--ct-bg-well);
+  border: none;
+  padding: 0;
+  margin: 0;
   position: relative;
+  cursor: default;
+}
+
+.own-cell:not(:disabled) {
+  cursor: crosshair;
+}
+
+.own-cell:not(:disabled):hover {
+  box-shadow: inset 0 0 0 2px var(--ct-border-live);
 }
 
 .own-cell--hull {

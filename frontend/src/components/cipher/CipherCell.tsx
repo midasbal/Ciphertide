@@ -49,10 +49,10 @@ export default function CipherCell({ row, col, state, tick, onClick, interactive
 
   const label =
     state === 'hidden'
-      ? `${coord(row, col)}, unrevealed`
+      ? `${cellCoordLabel(row, col)}, unrevealed`
       : state === 'decrypting'
-        ? `${coord(row, col)}, decrypting`
-        : `${coord(row, col)}, ${RESOLVED_LABEL[state] ?? state}`
+        ? `${cellCoordLabel(row, col)}, decrypting`
+        : `${cellCoordLabel(row, col)}, ${RESOLVED_LABEL[state] ?? state}`
 
   return (
     <button
@@ -86,7 +86,10 @@ function glyphSymbolFor(state: CipherCellState): string {
   }
 }
 
-function coord(row: number, col: number): string {
+/** The game's coordinate notation, a letter for the column and a
+ * 1-based number for the row, for example "G7". Shared by anything that
+ * needs to name a cell the same way this cell labels itself. */
+export function cellCoordLabel(row: number, col: number): string {
   const letter = String.fromCharCode(65 + col)
   return `${letter}${row + 1}`
 }

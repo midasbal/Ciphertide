@@ -24,6 +24,14 @@ export default function DecryptReadout({ text }: DecryptReadoutProps) {
   const rafRef = useRef<number | undefined>(undefined)
 
   useEffect(() => {
+    // Skips straight to the resolved text for prefers-reduced-motion,
+    // the same failsafe pattern Reveal uses: no scrambling loop, no
+    // repeating cycle, just the plain answer.
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setRevealed(text.length)
+      return
+    }
+
     let cancelled = false
     let phase: 'revealing' | 'holding' | 'paused' = 'revealing'
     startRef.current = performance.now()

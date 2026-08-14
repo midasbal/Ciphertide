@@ -86,7 +86,11 @@ export default function Lobby() {
       try {
         const phase = await client.getPhase(matchId)
         if (!cancelled && phase !== 0 /* WaitingForOpponent */) {
-          navigate(`/match/${matchId}`)
+          // Carries the current query string (namely ?dev-signer=a/b)
+          // forward, so getSigner still resolves the same way on the
+          // match screen instead of losing it on this navigation and
+          // bouncing to /register.
+          navigate(`/match/${matchId}${window.location.search}`)
         }
       } catch {
         // A transient read error, the next tick tries again.
@@ -160,7 +164,7 @@ export default function Lobby() {
       }
 
       await client.joinMatch(parsed.matchId, getSelectedCaptainId())
-      navigate(`/match/${parsed.matchId}`)
+      navigate(`/match/${parsed.matchId}${window.location.search}`)
     } catch (err) {
       setJoinState({ status: 'error', message: describeJoinFailure(err) })
     }

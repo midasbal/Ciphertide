@@ -243,6 +243,39 @@ export class CiphertideClient {
     return this.read<Address>('getPlayerAddress', [matchId, idx])
   }
 
+  // The captain id a player declared at create or join time, 1 through
+  // NUM_CAPTAINS, see screens/captains.ts for the id-to-captain table.
+  async getCaptain(matchId: MatchId, idx: PlayerIdx): Promise<number> {
+    return this.read<number>('getCaptain', [matchId, idx])
+  }
+
+  // Seconds left on a player's chess clock right now. Only changes
+  // between actions (see Ciphertide.sol's _beginAction), so a UI can
+  // safely tick this down locally between reads without drifting far,
+  // and should stop ticking entirely once it is not that player's turn
+  // or their move is mid-flight, since the real clock is not moving then
+  // either.
+  async getRemainingTime(matchId: MatchId, idx: PlayerIdx): Promise<bigint> {
+    return this.read<bigint>('getRemainingTime', [matchId, idx])
+  }
+
+  async getTimeBudgetSeconds(): Promise<bigint> {
+    return this.readConst('TIME_BUDGET_SECONDS')
+  }
+
+  // Whether this player has already placed a board this match. There is
+  // no direct "placed" getter, so this reads the same signal
+  // placeMyBoardStep itself is gated on: the board mask handle is the
+  // placeholder zero handle until the first placement step runs, and a
+  // real (non-zero) ciphertext handle from then on, finished or not. Used
+  // to skip a redundant placement attempt after a reload once a player
+  // has already placed, not to distinguish "finished" from "mid-flight",
+  // see placeBoard's own comment for that narrower gap.
+  async hasStartedPlacement(matchId: MatchId, idx: PlayerIdx): Promise<boolean> {
+    const handle = await this.read<Hex>('getBoardMask', [matchId, idx])
+    return nonZero(handle)
+  }
+
   // The next match id the contract will hand out. Since match ids are
   // handed out sequentially starting at 1 (see createMatch), any id from
   // 1 up to but excluding this value has been created at least once;
@@ -328,6 +361,16 @@ export class CiphertideClient {
   // Placement: NUM_SHIPS ship steps, then a final mines and reveal step,
   // confirmed once the allPlaced bit is ready. Ported from e2e/run.ts's
   // placeAndConfirm.
+  //
+  // Resuming after a reload mid-placement: each placeMyBoardStep call
+  // asks the contract to place whichever ship (or the mines) its own
+  // stored progress says comes next, it does not trust a step number
+  // from the caller, so calling this again after an interruption
+  // resumes correctly on its own. The one call that does NOT resume, and
+  // reverts instead, is calling this again once the player has already
+  // fully placed (the contract's own placed flag, see
+  // hasStartedPlacement's comment for why that specific finished-or-not
+  // distinction is not read ahead of time here).
   // ---------------------------------------------------------------
 
   async placeBoard(matchId: MatchId, onProgress?: ProgressCallback): Promise<{ allPlaced: boolean }> {

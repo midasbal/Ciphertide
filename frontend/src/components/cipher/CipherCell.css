@@ -182,3 +182,24 @@
     opacity: 0;
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .cc--hidden,
+  .cc--decrypting .cc-glyph,
+  .cc--hit,
+  .cc--miss,
+  .cc--mine,
+  .cc--shield {
+    animation: none;
+  }
+
+  .cc-sweep {
+    animation: none;
+    opacity: 0;
+  }
+
+  .cc--hit::before {
+    animation: none;
+    opacity: 0;
+  }
+}

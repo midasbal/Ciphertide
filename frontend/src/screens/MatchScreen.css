@@ -1,9 +1,6 @@
 .match-screen {
   position: relative;
   min-height: 100vh;
-  max-width: 74rem;
-  margin: 0 auto;
-  padding: var(--ct-space-6) var(--ct-space-5) var(--ct-space-8);
   display: flex;
   flex-direction: column;
   gap: var(--ct-space-6);
@@ -19,7 +16,10 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--ct-space-2) var(--ct-space-4);
-  padding-bottom: var(--ct-space-4);
+  max-width: 88rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-6) var(--ct-space-6) var(--ct-space-4);
   border-bottom: 1px solid var(--ct-border);
 }
 
@@ -54,71 +54,96 @@
 }
 
 /* ---------------------------------------------------------------
- * Status bar: phase, turn, clock, captain
+ * The two-column theater: boards on the left, chat and skills on
+ * the right.
  * --------------------------------------------------------------- */
 
-.status-bar {
+.match-theater {
+  flex: 1;
+  max-width: 88rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: 0 var(--ct-space-6) var(--ct-space-8);
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 1px;
-  background: var(--ct-border-faint);
-  border: 1px solid var(--ct-border);
-  border-radius: var(--ct-radius-md);
-  overflow: hidden;
-}
-
-.status-item {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ct-space-1);
-  padding: var(--ct-space-3) var(--ct-space-4);
-  background: var(--ct-bg-panel);
-}
-
-.status-value {
-  font-family: var(--ct-font-display);
-  font-size: var(--ct-text-md);
-  letter-spacing: var(--ct-tracking-wide);
-  color: var(--ct-text-primary);
-}
-
-.status-value--live {
-  color: var(--ct-accent-bright);
-}
-
-.status-value--accent {
-  color: var(--ct-hit-bright);
-}
-
-/* ---------------------------------------------------------------
- * Board theater: the two waters, side by side
- * --------------------------------------------------------------- */
-
-.board-theater {
-  display: grid;
-  /* minmax(0, 1fr), not a bare 1fr: the enemy panel's decrypt readout
-   * line is wide enough to force its own min-content, and a bare 1fr
-   * track cannot shrink below that, which was silently starving the
-   * own-waters column of half its rightful width. */
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 22rem;
   gap: var(--ct-space-6);
+  align-items: start;
 }
 
-@media (max-width: 860px) {
-  .board-theater {
+@media (max-width: 1100px) {
+  .match-theater {
+    grid-template-columns: minmax(0, 1fr) 19rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .match-theater {
     grid-template-columns: 1fr;
   }
 }
+
+.match-column--boards {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--ct-bg-panel);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-lg);
+  box-shadow: var(--ct-shadow-panel);
+  overflow: hidden;
+}
+
+.match-column--side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-5);
+}
+
+.side-panel {
+  background: var(--ct-bg-panel);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-lg);
+  box-shadow: var(--ct-shadow-panel);
+  overflow: hidden;
+}
+
+.side-panel--chat {
+  min-height: 14rem;
+  display: flex;
+}
+
+.side-panel--skills {
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 900px) {
+  .match-column--side {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .side-panel {
+    flex: 1 1 16rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .match-column--side {
+    flex-direction: column;
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Board panels: enemy on top, your own below, the status divider
+ * bridging the two so the column reads as one instrument.
+ * --------------------------------------------------------------- */
 
 .board-panel {
   display: flex;
   flex-direction: column;
   gap: var(--ct-space-4);
   padding: var(--ct-space-5);
-  background: var(--ct-bg-panel);
-  border: 1px solid var(--ct-border);
-  border-radius: var(--ct-radius-lg);
-  box-shadow: var(--ct-shadow-panel);
 }
 
 .board-panel-head {
@@ -132,12 +157,15 @@
   font-size: var(--ct-text-lg);
 }
 
-.board-panel--enemy {
-  border-color: var(--ct-border-strong);
-}
-
 .enemy-panel-body {
   position: relative;
+}
+
+.board-loading {
+  padding: var(--ct-space-6);
+  text-align: center;
+  color: var(--ct-text-tertiary);
+  font-size: var(--ct-text-sm);
 }
 
 /* A slow rotating sonar sweep sitting behind the enemy grid: the room's
@@ -164,75 +192,142 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .sonar-sweep {
+    animation: none;
+  }
+}
+
 /* ---------------------------------------------------------------
- * Footer: skill dock and sonar log
+ * Placement and dice sub-views, shown in the skills slot before
+ * combat starts.
  * --------------------------------------------------------------- */
 
-.console-footer {
+.placement-view {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--ct-space-5);
-  padding-top: var(--ct-space-4);
-  border-top: 1px solid var(--ct-border);
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: var(--ct-space-3);
+  padding: var(--ct-space-4);
 }
 
-.skill-dock {
-  display: flex;
-  gap: var(--ct-space-2);
+.placement-copy {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-sm);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  margin: 0;
 }
 
-.skill-chip {
+.placement-note {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-xs);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-tertiary);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------
+ * Errors, the one place ember shows up on this screen
+ * --------------------------------------------------------------- */
+
+.match-error {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: var(--ct-space-2);
-  padding: var(--ct-space-2) var(--ct-space-3);
-  background: var(--ct-bg-panel-raised);
-  border: 1px solid var(--ct-border);
+  padding: var(--ct-space-3) var(--ct-space-4);
+  margin: 0 var(--ct-space-4) var(--ct-space-4);
+  background: var(--ct-hit-faint);
+  border: 1px solid var(--ct-hit-soft);
   border-radius: var(--ct-radius-md);
 }
 
-.skill-chip-label {
-  font-family: var(--ct-font-display);
+.match-error p {
+  margin: 0;
   font-size: var(--ct-text-sm);
-  letter-spacing: var(--ct-tracking-wide);
-  color: var(--ct-text-secondary);
-}
-
-.skill-chip-charge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.3rem;
-  height: 1.3rem;
-  border-radius: 50%;
-  background: var(--ct-accent-faint);
-  color: var(--ct-accent-bright);
-  font-size: var(--ct-text-xs);
-  border: 1px solid var(--ct-border-live);
-}
-
-.sonar-log {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ct-space-1);
-  font-size: var(--ct-text-2xs);
-  text-align: right;
-}
-
-.sonar-log-line {
-  color: var(--ct-text-tertiary);
-}
-
-.sonar-log-line--hit {
   color: var(--ct-hit-bright);
 }
 
-.sonar-log-line--miss {
+/* ---------------------------------------------------------------
+ * Buttons and full-screen message states (loading, not found,
+ * result).
+ * --------------------------------------------------------------- */
+
+.match-btn {
+  appearance: none;
+  border-radius: var(--ct-radius-md);
+  font-family: var(--ct-font-mono);
+  font-size: var(--ct-text-sm);
+  letter-spacing: var(--ct-tracking-wide);
+  text-transform: uppercase;
+  padding: var(--ct-space-3) var(--ct-space-5);
+  cursor: pointer;
+  transition:
+    background var(--ct-duration-standard) var(--ct-ease-standard),
+    border-color var(--ct-duration-standard) var(--ct-ease-standard),
+    color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.match-btn--primary {
+  border: 1px solid var(--ct-border-live);
+  background: var(--ct-accent);
+  color: var(--ct-text-on-accent);
+}
+
+.match-btn--primary:hover {
+  background: var(--ct-accent-bright);
+}
+
+.match-btn--ghost {
+  border: 1px solid var(--ct-border-faint);
+  background: transparent;
   color: var(--ct-text-secondary);
 }
 
-.sonar-log-line--live {
+.match-btn--ghost:hover {
+  border-color: var(--ct-border);
+  color: var(--ct-text-primary);
+}
+
+.match-screen--message {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--ct-space-6);
+}
+
+.match-message-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ct-space-3);
+  max-width: 28rem;
+  padding: var(--ct-space-6);
+  background: var(--ct-bg-panel);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-lg);
+  box-shadow: var(--ct-shadow-panel);
+}
+
+.match-message-panel--win {
+  border-color: var(--ct-border-live);
+  box-shadow: var(--ct-glow-accent);
+}
+
+.match-message-panel--loss {
+  border-color: var(--ct-hit);
+  box-shadow: var(--ct-glow-ember);
+}
+
+.match-result-title {
+  font-size: var(--ct-text-2xl);
+}
+
+.match-message-panel--win .match-result-title {
   color: var(--ct-accent-bright);
+}
+
+.match-message-panel--loss .match-result-title {
+  color: var(--ct-hit-bright);
 }

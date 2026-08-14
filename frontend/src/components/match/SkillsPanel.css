@@ -1,0 +1,109 @@
+.skills-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-3);
+  height: 100%;
+  padding: var(--ct-space-4);
+}
+
+.skills-panel-head {
+  padding-bottom: var(--ct-space-2);
+  border-bottom: 1px solid var(--ct-border-faint);
+}
+
+.skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-2);
+  overflow-y: auto;
+}
+
+.skill-row {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ct-space-1);
+  width: 100%;
+  text-align: left;
+  padding: var(--ct-space-3);
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-md);
+  cursor: pointer;
+  transition:
+    border-color var(--ct-duration-standard) var(--ct-ease-standard),
+    background var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.skill-row:disabled {
+  cursor: not-allowed;
+}
+
+.skill-row:not(:disabled):hover {
+  border-color: var(--ct-border);
+}
+
+.skill-row--active {
+  border-color: var(--ct-border-live);
+  background: var(--ct-accent-faint);
+  box-shadow: var(--ct-glow-accent);
+}
+
+.skill-row--used {
+  opacity: 0.5;
+}
+
+.skill-row--unavailable {
+  opacity: 0.55;
+}
+
+.skill-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: var(--ct-space-2);
+}
+
+.skill-row-label {
+  font-family: var(--ct-font-display);
+  font-weight: 600;
+  font-size: var(--ct-text-sm);
+  color: var(--ct-text-primary);
+  letter-spacing: var(--ct-tracking-wide);
+}
+
+.skill-row-tag {
+  font-size: 0.5625rem;
+  color: var(--ct-text-tertiary);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-sm);
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.skill-row-tag--active {
+  color: var(--ct-color-glow-bright);
+  border-color: var(--ct-border-live);
+}
+
+.skill-row-tag--unavailable {
+  color: var(--ct-text-ghost);
+}
+
+.skill-row-copy {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-xs);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+}
+
+.skills-progress {
+  padding: var(--ct-space-2) var(--ct-space-3);
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-live);
+  border-radius: var(--ct-radius-md);
+  font-size: var(--ct-text-xs);
+  color: var(--ct-color-glow-bright);
+}

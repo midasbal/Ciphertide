@@ -7,3 +7,12 @@
   border-radius: var(--ct-radius-sm);
   box-shadow: var(--ct-shadow-well);
 }
+
+/* The pending target area for an armed skill, before it fires: a plain
+ * highlight ring, distinct from any resolved cc-- state color so it
+ * never reads as an outcome. */
+.enemy-cell-highlight {
+  position: relative;
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px var(--ct-border-live);
+}

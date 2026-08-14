@@ -43,3 +43,10 @@
     transform: scale(1.15);
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .decrypt-readout-dot {
+    animation: none;
+    opacity: 0.85;
+  }
+}
