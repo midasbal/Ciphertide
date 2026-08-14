@@ -54,13 +54,20 @@ contract CiphertideHarness is Ciphertide {
         return matches[matchId].players[playerIdx].shipMask[shipIdx];
     }
 
-    /// @dev Runs the real placement loop starting from a fully occupied
-    ///      board, so every attempt for every ship is guaranteed to
-    ///      overlap. Used to deterministically exercise the all-attempts-
-    ///      fail retry path without relying on the astronomically unlikely
-    ///      real failure case.
-    function forcePlacementFailureForTesting(uint256 matchId, uint8 playerIdx) external {
-        _runPlacement(matchId, playerIdx, e.asEuint256(type(uint256).max));
+    /// @dev Runs one real placement step starting from a fully occupied
+    ///      board on the first call of a round, so every attempt for every
+    ///      ship (and the mines) is guaranteed to overlap. Used to
+    ///      deterministically exercise the all-attempts-fail retry path
+    ///      without relying on the astronomically unlikely real failure
+    ///      case. Call this NUM_SHIPS + 1 times in a row, exactly like a
+    ///      real caller would call placeMyBoardStep, to reach the final
+    ///      reveal.
+    function forcePlacementFailureStepForTesting(uint256 matchId, uint8 playerIdx) external {
+        _runPlacementStep(matchId, playerIdx, e.asEuint256(type(uint256).max));
+    }
+
+    function getPlacementShipsDone(uint256 matchId, uint8 playerIdx) external view returns (uint8) {
+        return matches[matchId].players[playerIdx].placementShipsDone;
     }
 
     function getPendingSonarHandle(uint256 matchId) external view returns (bytes32) {

@@ -25,6 +25,19 @@ struct PlayerSlot {
     uint256 remainingTime;
     bool placementPending;
     ebool pendingAllPlaced;
+    // Placement is spread across several placeMyBoardStep calls, one ship
+    // per call plus a final mines-and-reveal call, so no single transaction
+    // needs to run all ~140 random draws at once. 0 means no step has run
+    // yet this placement round (the next call starts a fresh round and
+    // resets boardMask and placementAllPlacedSoFar), NUM_SHIPS means every
+    // ship step is done and the next call places mines and reveals.
+    uint8 placementShipsDone;
+    // Running AND of every step's placed bit so far this round, encrypted,
+    // never revealed until the final step folds in the mine result and
+    // reveals the single allPlaced bit into pendingAllPlaced below. Kept
+    // separate from pendingAllPlaced, which is the one specific value
+    // confirmPlacement's attestation is checked against.
+    ebool placementAllPlacedSoFar;
     bool bonusShotAvailable; // set when the opponent triggers one of this player's mines
     bool sonarUsed;
     bool barrageUsed;

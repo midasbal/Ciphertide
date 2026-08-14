@@ -178,6 +178,7 @@ contract Ciphertide {
 
     event MatchCreated(uint256 indexed matchId, address indexed creator);
     event MatchJoined(uint256 indexed matchId, address indexed opponent);
+    event PlacementStepSubmitted(uint256 indexed matchId, address indexed player, uint8 shipsDone, uint8 totalShips);
     event PlacementSubmitted(uint256 indexed matchId, address indexed player, bytes32 allPlacedHandle);
     event PlacementConfirmed(uint256 indexed matchId, address indexed player);
     event PlacementRetryNeeded(uint256 indexed matchId, address indexed player);
@@ -278,18 +279,30 @@ contract Ciphertide {
         emit MatchJoined(matchId, msg.sender);
     }
 
-    /// @notice Randomly and confidentially places this caller's fleet.
-    /// @dev Ships are placed longest first, each with PLACEMENT_ATTEMPTS_PER_SHIP
-    ///      independent random candidate slots; the first non-overlapping
-    ///      candidate wins via the select multiplexer pattern. Every draw,
-    ///      decoded position, candidate mask and overlap check stays on
-    ///      encrypted values end to end. The only value ever revealed is a
-    ///      single allPlaced success bit, confirmed in confirmPlacement. On
-    ///      the rare case not every ship found a free slot within its
-    ///      attempts, allPlaced reveals false and nothing is written to the
-    ///      committed board state, so the caller can call this again for a
-    ///      fresh, independent set of draws.
-    function placeMyBoard(uint256 matchId) external payable onlyPlayer(matchId) {
+    /// @notice Randomly and confidentially places one more piece of this
+    ///         caller's fleet: either the next ship, or, once every ship's
+    ///         step has run, the two mines followed by the single allPlaced
+    ///         reveal. Call this NUM_SHIPS + 1 times in a row (6 ship steps,
+    ///         then one mine and reveal step) to place a full board.
+    /// @dev Split into one ship per call, plus mines and the reveal folded
+    ///      into a single final call, so no single transaction ever needs
+    ///      to run more than PLACEMENT_ATTEMPTS_PER_SHIP (or the mine
+    ///      equivalent) random draws: a hosted RPC's own per-transaction
+    ///      gas cap is well under what a full ~140 draw placement needs in
+    ///      one call, even though the chain's own block gas limit is not
+    ///      the constraint. Ships are placed longest first, each with
+    ///      PLACEMENT_ATTEMPTS_PER_SHIP independent random candidate slots;
+    ///      the first non-overlapping candidate wins via the select
+    ///      multiplexer pattern. Every draw, decoded position, candidate
+    ///      mask and overlap check stays on encrypted values end to end.
+    ///      The only value ever revealed, at the final step, is a single
+    ///      allPlaced success bit, confirmed in confirmPlacement exactly as
+    ///      before. On the rare case not every ship or mine found a free
+    ///      slot within its attempts, allPlaced reveals false once
+    ///      confirmed and placementShipsDone resets to 0, so the caller can
+    ///      call this again from the first ship for a fresh, independent
+    ///      set of draws.
+    function placeMyBoardStep(uint256 matchId) external payable onlyPlayer(matchId) {
         Match storage m = matches[matchId];
         require(m.phase == Phase.Placing, "not in placement phase");
         uint8 playerIdx = msg.sender == m.players[0].addr ? 0 : 1;
@@ -297,61 +310,77 @@ contract Ciphertide {
         require(!p.placed, "already placed");
         require(!p.placementPending, "placement already submitted, awaiting confirmation");
 
-        uint256 totalDraws =
-            uint256(NUM_SHIPS) * PLACEMENT_ATTEMPTS_PER_SHIP + uint256(MINES_PER_PLAYER) * MINE_PLACEMENT_ATTEMPTS;
-        _requireFee(totalDraws);
+        if (p.placementShipsDone < NUM_SHIPS) {
+            _requireFee(PLACEMENT_ATTEMPTS_PER_SHIP);
+        } else {
+            _requireFee(uint256(MINES_PER_PLAYER) * MINE_PLACEMENT_ATTEMPTS);
+        }
 
-        _runPlacement(matchId, playerIdx, e.asEuint256(uint256(0)));
+        _runPlacementStep(matchId, playerIdx, e.asEuint256(uint256(0)));
     }
 
-    /// @dev Runs the placement loop starting from a given occupied mask and
-    ///      submits the result. Split out from placeMyBoard so a test
-    ///      harness can start from a deliberately full board to exercise the
-    ///      all-attempts-fail retry path deterministically, without any
-    ///      change to the real placement logic itself.
-    function _runPlacement(uint256 matchId, uint8 playerIdx, euint256 startingOccupied) internal {
+    /// @dev Runs one placement step, starting a fresh round from
+    ///      freshStartOccupied whenever placementShipsDone is 0. Split out
+    ///      from placeMyBoardStep so a test harness can start a round from
+    ///      a deliberately full board to exercise the all-attempts-fail
+    ///      retry path deterministically, without any change to the real
+    ///      placement logic itself.
+    function _runPlacementStep(uint256 matchId, uint8 playerIdx, euint256 freshStartOccupied) internal {
         Match storage m = matches[matchId];
         PlayerSlot storage p = m.players[playerIdx];
 
-        euint256 occupied = startingOccupied;
-        ebool allPlaced = e.asEbool(true);
-        euint256[NUM_SHIPS] memory shipMasks;
-
-        for (uint8 i = 0; i < NUM_SHIPS; i++) {
-            (euint256 shipMask, ebool placedThisShip) =
-                CiphertideMechanics.placeOneShip(SHIP_LENGTHS[i], occupied, PLACEMENT_ATTEMPTS_PER_SHIP);
-            // shipMask is still the trivial zero handle whenever no attempt
-            // succeeded, so folding it into occupied is always safe.
-            occupied = occupied.or(shipMask);
-            shipMasks[i] = shipMask;
-            allPlaced = allPlaced.and(placedThisShip);
+        if (p.placementShipsDone == 0) {
+            freshStartOccupied.allowThis();
+            p.boardMask = freshStartOccupied;
+            ebool trueBit = e.asEbool(true);
+            trueBit.allowThis();
+            p.placementAllPlacedSoFar = trueBit;
         }
 
-        // Mines are placed after the fleet, avoiding every ship cell, so
-        // they land on water only. They must never be allowed to the
-        // opponent, only to this contract and the owner.
-        (euint256 mineMask, ebool allMinesPlaced) =
-            CiphertideMechanics.placeMines(occupied, MINES_PER_PLAYER, MINE_PLACEMENT_ATTEMPTS);
-        allPlaced = allPlaced.and(allMinesPlaced);
+        if (p.placementShipsDone < NUM_SHIPS) {
+            uint8 shipIdx = p.placementShipsDone;
+            (euint256 shipMask, ebool placedThisShip) =
+                CiphertideMechanics.placeOneShip(SHIP_LENGTHS[shipIdx], p.boardMask, PLACEMENT_ATTEMPTS_PER_SHIP);
 
-        occupied.allowThis();
-        occupied.allow(msg.sender);
+            // shipMask is still the trivial zero handle whenever no attempt
+            // succeeded, so folding it into the occupied mask is always safe.
+            euint256 newOccupied = p.boardMask.or(shipMask);
+            newOccupied.allowThis();
+            newOccupied.allow(msg.sender);
+            p.boardMask = newOccupied;
+
+            shipMask.allowThis();
+            shipMask.allow(msg.sender);
+            p.shipMask[shipIdx] = shipMask;
+
+            euint256 zeroHits = e.asEuint256(uint256(0));
+            zeroHits.allowThis();
+            p.shipHits[shipIdx] = zeroHits;
+
+            ebool stillAllPlaced = p.placementAllPlacedSoFar.and(placedThisShip);
+            stillAllPlaced.allowThis();
+            p.placementAllPlacedSoFar = stillAllPlaced;
+
+            p.placementShipsDone = shipIdx + 1;
+
+            emit PlacementStepSubmitted(matchId, msg.sender, p.placementShipsDone, NUM_SHIPS);
+            return;
+        }
+
+        // Every ship step is done: mines are placed last, avoiding every
+        // ship cell, so they land on water only. They must never be
+        // allowed to the opponent, only to this contract and the owner.
+        (euint256 mineMask, ebool allMinesPlaced) =
+            CiphertideMechanics.placeMines(p.boardMask, MINES_PER_PLAYER, MINE_PLACEMENT_ATTEMPTS);
+        ebool allPlaced = p.placementAllPlacedSoFar.and(allMinesPlaced);
+
         mineMask.allowThis();
         mineMask.allow(msg.sender);
         allPlaced.allowThis();
         e.reveal(allPlaced);
 
-        p.boardMask = occupied;
         p.mineMask = mineMask;
-        for (uint8 i = 0; i < NUM_SHIPS; i++) {
-            shipMasks[i].allowThis();
-            shipMasks[i].allow(msg.sender);
-            p.shipMask[i] = shipMasks[i];
 
-            euint256 zero = e.asEuint256(uint256(0));
-            zero.allowThis();
-            p.shipHits[i] = zero;
-        }
         euint256 zeroDestroyed = e.asEuint256(uint256(0));
         zeroDestroyed.allowThis();
         p.lastDestroyedMask = zeroDestroyed;
@@ -362,6 +391,9 @@ contract Ciphertide {
         // shieldActive is a plain bool, its zero value already defaults to
         // false, no encrypted trivial-zero handle is needed for it.
 
+        // Reset for whichever round comes next, a retry after a false
+        // allPlaced or, once this one confirms true, never read again.
+        p.placementShipsDone = 0;
         p.placementPending = true;
         p.pendingAllPlaced = allPlaced;
 
@@ -427,9 +459,11 @@ contract Ciphertide {
                 m.phase = Phase.AwaitingDiceRoll;
             }
         } else {
-            // Not every ship found a free slot within its attempts. Nothing
-            // is committed, the player can call placeMyBoard again for a
-            // fresh, independent set of random draws.
+            // Not every ship or mine found a free slot within its attempts.
+            // placementShipsDone is already back to 0 (reset at the end of
+            // _runPlacementStep's final step), so the player's next
+            // placeMyBoardStep call starts a fresh round from the first
+            // ship again with a fresh, independent set of random draws.
             emit PlacementRetryNeeded(matchId, p.addr);
         }
     }
@@ -438,7 +472,7 @@ contract Ciphertide {
     ///      real random placement, so shot resolution, turn order and win
     ///      detection can be built and tested independently of the
     ///      placement design decision. Not part of the intended production
-    ///      surface, callers besides tests should use placeMyBoard.
+    ///      surface, callers besides tests should use placeMyBoardStep.
     ///      Takes plain masks and trivially encrypts them here, in this
     ///      contract's own context, so this contract is the one that ends
     ///      up allowed on the resulting handles (a handle trivially

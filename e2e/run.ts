@@ -188,31 +188,25 @@ async function main() {
   // gas in the tens of millions, at or past that estimation cap, so
   // estimateGas itself fails with a bare "execution reverted" before the
   // transaction is ever sent, even though a direct eth_call with an
-  // explicit high gas value confirms the call actually succeeds (measured
-  // locally: placeMyBoard's real 140 draws need roughly 51 to 55 million
-  // gas, right against a plain geth-style default RPCGasCap of 50 million).
-  // Passing an explicit gas limit skips estimation entirely.
+  // explicit high gas value confirms the call actually succeeds. Passing
+  // an explicit gas limit skips estimation entirely.
   //
-  // This only gets you to the next wall, and it is not specific to free
-  // public RPCs: every endpoint tried here, including a paid Alchemy
-  // Base Sepolia endpoint, also rejects eth_sendRawTransaction itself
-  // once the declared gas limit passes a policy ceiling of its own.
-  // sepolia.base.org, publicnode and drpc reject anywhere from about 20
-  // to 50 million depending on which backend node answers; the Alchemy
-  // endpoint tested here accepts up to somewhere between 15 and 20
-  // million (confirmed by an actual included, out-of-gas-reverted
-  // transaction at 14 to 15 million, and an outright "gas limit too
-  // high" rejection at 20 million and up). All of these sit well short
-  // of the ~51 to 55 million placeMyBoard actually needs. This is a real,
-  // separate ceiling from estimateGas's, and it is the genuine blocker
-  // recorded in this session's report, not something this script can
-  // work around from the client side: it needs an RPC provider (or a
-  // higher tier of one) configured with a per-transaction gas allowance
-  // above roughly 55 million for BASE_SEPOLIA_RPC_URL. The values below
-  // are generous headroom for that case, real gas used is what gets
-  // billed, not the limit.
+  // Placement used to need this treatment too (its old single call ran
+  // all ~140 draws at once, needing roughly 51 to 55 million real gas),
+  // but every hosted RPC tried, free public ones and a paid Alchemy Base
+  // Sepolia endpoint alike, also rejects eth_sendRawTransaction itself
+  // once the declared gas limit passes a policy ceiling of its own,
+  // anywhere from about 15 to 50 million depending on the provider, well
+  // short of what one placement call needed. That ceiling is not
+  // something this script can work around from the client side, an
+  // explicit gas limit does not help once the RPC refuses to broadcast
+  // the transaction at all. The real fix was on the contract side:
+  // placement is now placeMyBoardStep, one ship (or the mines and reveal)
+  // per call, so no single placement transaction needs more than about
+  // 10 million real gas, comfortably under every ceiling seen so far, no
+  // explicit override needed. Bombardment, Barrage and Rake still run
+  // many draws in one call and keep their overrides below.
   const explicitGasLimits: Record<string, bigint> = {
-    placeMyBoard: 120_000_000n,
     useBombardment: 80_000_000n,
     useBarrage: 60_000_000n,
     useRake: 60_000_000n,
@@ -268,7 +262,6 @@ async function main() {
   const PLACEMENT_ATTEMPTS_PER_SHIP = await readConst("PLACEMENT_ATTEMPTS_PER_SHIP");
   const MINES_PER_PLAYER = await readConst("MINES_PER_PLAYER");
   const MINE_PLACEMENT_ATTEMPTS = await readConst("MINE_PLACEMENT_ATTEMPTS");
-  const placementDraws = NUM_SHIPS * PLACEMENT_ATTEMPTS_PER_SHIP + MINES_PER_PLAYER * MINE_PLACEMENT_ATTEMPTS;
 
   const BARRAGE_MAX_CELLS = await readConst("BARRAGE_MAX_CELLS");
   const BARRAGE_ATTEMPTS_PER_CELL = await readConst("BARRAGE_ATTEMPTS_PER_CELL");
@@ -288,21 +281,39 @@ async function main() {
   const CAPTAIN_SALVO = await readConst("CAPTAIN_SALVO");
   const CAPTAIN_CARPET = await readConst("CAPTAIN_CARPET");
 
+  // Placement is spread across NUM_SHIPS + 1 separate placeMyBoardStep
+  // calls, one ship per call, then a final call that places both mines
+  // and reveals the single allPlaced bit, so no single transaction ever
+  // needs to run more than PLACEMENT_ATTEMPTS_PER_SHIP (or the mine
+  // equivalent) random draws. Only the final step emits PlacementSubmitted
+  // and needs an attestation and a confirmPlacement call, the ship steps
+  // are single phase, nothing to reveal or confirm for those. On a false
+  // allPlaced the contract has already reset its own step counter back to
+  // the first ship, so retrying just means running the same NUM_SHIPS + 1
+  // calls again from the start.
   async function placeAndConfirm(matchId: bigint, wallet: typeof walletA, idx: number, label: string) {
-    const fee = (await getFee()) * placementDraws;
-    console.log(`${label}: placing board (${placementDraws} random draws, fee ${fee} wei)...`);
     for (let attempt = 0; attempt < 3; attempt++) {
-      const { receipt, confirmReceipt, allPlaced } = await timed(`${label} placement`, async () => {
-        const receipt = await write(wallet, "placeMyBoard", [matchId], fee);
-        console.log(`${label}: placement submitted, gas ${receipt.gasUsed}`);
+      console.log(`${label}: placing board across ${NUM_SHIPS + 1n} steps (one per ship, then mines)...`);
+      for (let step = 1n; step <= NUM_SHIPS; step++) {
+        const shipFee = (await getFee()) * PLACEMENT_ATTEMPTS_PER_SHIP;
+        await timed(`${label} ship step ${step}/${NUM_SHIPS}`, async () => {
+          const receipt = await write(wallet, "placeMyBoardStep", [matchId], shipFee);
+          console.log(`${label}: ship step ${step}/${NUM_SHIPS} submitted, gas ${receipt.gasUsed}`);
+        });
+      }
+
+      const mineFee = (await getFee()) * MINES_PER_PLAYER * MINE_PLACEMENT_ATTEMPTS;
+      const { confirmReceipt, allPlaced } = await timed(`${label} mines and reveal`, async () => {
+        const receipt = await write(wallet, "placeMyBoardStep", [matchId], mineFee);
+        console.log(`${label}: mines and reveal step submitted, gas ${receipt.gasUsed}`);
         const { allPlacedHandle } = findEvent(receipt, "PlacementSubmitted") as { allPlacedHandle: Hex };
         const [{ attestation, signatures }] = await revealAsAttestations([allPlacedHandle]);
         const confirmReceipt = await write(wallet, "confirmPlacement", [matchId, idx, attestation, signatures]);
-        return { receipt, confirmReceipt, allPlaced: nonZero(attestation.value) };
+        return { confirmReceipt, allPlaced: nonZero(attestation.value) };
       });
       console.log(`${label}: confirmPlacement gas ${confirmReceipt.gasUsed}, allPlaced=${allPlaced}`);
       if (allPlaced) return;
-      console.log(`${label}: placement did not find a free slot for every ship, retrying...`);
+      console.log(`${label}: placement did not find a free slot for every ship, retrying from the first ship...`);
     }
     throw new Error(`${label}: placement never succeeded after 3 attempts`);
   }

@@ -38,19 +38,40 @@ contract PlacementTest is IncoTest {
         game.joinMatch(matchId, p1Captain);
     }
 
-    function _placementFee() internal view returns (uint256) {
-        uint256 shipDraws = uint256(NUM_SHIPS) * game.PLACEMENT_ATTEMPTS_PER_SHIP();
-        uint256 mineDraws = uint256(game.MINES_PER_PLAYER()) * game.MINE_PLACEMENT_ATTEMPTS();
-        return inco.getFee() * (shipDraws + mineDraws);
+    /// @dev Fee for one ship placement step: PLACEMENT_ATTEMPTS_PER_SHIP
+    /// random draws.
+    function _shipStepFee() internal view returns (uint256) {
+        return inco.getFee() * game.PLACEMENT_ATTEMPTS_PER_SHIP();
     }
 
-    /// @dev Submits a placement and confirms it, returning whether the
-    /// attested allPlaced bit was true.
-    function _placeAndConfirm(uint256 matchId, address player) internal returns (bool allPlaced) {
-        uint256 fee = _placementFee();
+    /// @dev Fee for the final step: MINES_PER_PLAYER * MINE_PLACEMENT_ATTEMPTS
+    /// random draws, plus the free allPlaced reveal.
+    function _mineStepFee() internal view returns (uint256) {
+        return inco.getFee() * uint256(game.MINES_PER_PLAYER()) * game.MINE_PLACEMENT_ATTEMPTS();
+    }
+
+    /// @dev Runs every placement step for player in order (NUM_SHIPS ship
+    /// steps, then the mines and reveal step), the same sequence a real
+    /// caller drives across NUM_SHIPS + 1 separate transactions.
+    function _runAllPlacementSteps(uint256 matchId, address player) internal {
+        uint256 shipFee = _shipStepFee();
+        for (uint8 i = 0; i < NUM_SHIPS; i++) {
+            vm.prank(player);
+            game.placeMyBoardStep{value: shipFee}(matchId);
+            processAllOperations();
+        }
+        // Fee computed before the prank so the prank is not consumed by the
+        // intermediate view calls _mineStepFee() itself makes.
+        uint256 mineFee = _mineStepFee();
         vm.prank(player);
-        game.placeMyBoard{value: fee}(matchId);
+        game.placeMyBoardStep{value: mineFee}(matchId);
         processAllOperations();
+    }
+
+    /// @dev Submits every placement step and confirms the result, returning
+    /// whether the attested allPlaced bit was true.
+    function _placeAndConfirm(uint256 matchId, address player) internal returns (bool allPlaced) {
+        _runAllPlacementSteps(matchId, player);
 
         uint8 playerIdx = game.getPlayerAddress(matchId, 0) == player ? 0 : 1;
         bytes32 handle = game.getPendingPlacementHandle(matchId, playerIdx);
@@ -67,11 +88,12 @@ contract PlacementTest is IncoTest {
     function testPlacementProducesValidNonOverlappingInGridLayoutAcrossManySeeds() public {
         uint8[6] memory lengths = [5, 4, 4, 4, 3, 3];
 
-        // Each createMatch/placeMyBoard call advances the mock's internal
-        // randomness counter, so running this across many independent
-        // matches exercises many different sets of random draws.
-        // Kept modest: each round replays ~120 mock Inco operations, and the
-        // mock's op log grows unbounded within a single test's memory limit.
+        // Each createMatch/placeMyBoardStep call advances the mock's
+        // internal randomness counter, so running this across many
+        // independent matches exercises many different sets of random
+        // draws. Kept modest: each round replays ~140 mock Inco operations
+        // across its NUM_SHIPS + 1 steps, and the mock's op log grows
+        // unbounded within a single test's memory limit.
         for (uint256 round = 0; round < 3; round++) {
             uint256 matchId = _createAndJoinMatch(alice, bob);
             bool allPlaced = _placeAndConfirm(matchId, alice);
@@ -99,18 +121,76 @@ contract PlacementTest is IncoTest {
         }
     }
 
-    /// @dev Isolates just the placeMyBoard call's own gas cost, separate
-    /// from IncoTest's one-time mock infrastructure deployment in setUp().
-    function testPlacementGasUsage() public {
+    /// @dev Isolates each placeMyBoardStep call's own gas cost, separate
+    /// from IncoTest's one-time mock infrastructure deployment in setUp(),
+    /// and asserts every step stays comfortably under 14 million gas, the
+    /// number a hosted RPC's own per-transaction gas cap needs each step to
+    /// clear regardless of the chain's own, much higher, block gas limit.
+    function testPlacementStepGasUsage() public {
         uint256 matchId = _createAndJoinMatch(alice, bob);
-        uint256 fee = _placementFee();
+        uint256 shipFee = _shipStepFee();
 
+        for (uint8 i = 0; i < NUM_SHIPS; i++) {
+            vm.prank(alice);
+            uint256 gasBefore = gasleft();
+            game.placeMyBoardStep{value: shipFee}(matchId);
+            uint256 gasUsed = gasBefore - gasleft();
+            console.log("placeMyBoardStep ship gas used (1 ship x 20 attempts):", gasUsed);
+            assertLt(gasUsed, 14_000_000, "a ship step must stay comfortably under a hosted RPC's per-tx gas cap");
+            processAllOperations();
+        }
+
+        uint256 mineFee = _mineStepFee();
         vm.prank(alice);
-        uint256 gasBefore = gasleft();
-        game.placeMyBoard{value: fee}(matchId);
-        uint256 gasUsed = gasBefore - gasleft();
+        uint256 gasBeforeMines = gasleft();
+        game.placeMyBoardStep{value: mineFee}(matchId);
+        uint256 gasUsedMines = gasBeforeMines - gasleft();
+        console.log("placeMyBoardStep mines and reveal gas used (2 mines x 10 attempts):", gasUsedMines);
+        assertLt(
+            gasUsedMines, 14_000_000, "the mines and reveal step must stay comfortably under a hosted RPC's per-tx gas cap"
+        );
+    }
 
-        console.log("placeMyBoard gas used (6 ships x 20 attempts):", gasUsed);
+    /// @dev placementShipsDone should count up one per ship step, then
+    /// reset to 0 once the final step commits the round (whether allPlaced
+    /// comes back true or, on a retry, false), so the next round starts
+    /// from the first ship again.
+    function testPlacementStepsProgressCorrectly() public {
+        uint256 matchId = _createAndJoinMatch(alice, bob);
+        uint256 shipFee = _shipStepFee();
+
+        for (uint8 i = 0; i < NUM_SHIPS; i++) {
+            assertEq(game.getPlacementShipsDone(matchId, 0), i, "ships done should match steps run so far");
+            vm.prank(alice);
+            game.placeMyBoardStep{value: shipFee}(matchId);
+            processAllOperations();
+            assertEq(game.getPlacementShipsDone(matchId, 0), i + 1, "ships done should advance by one per step");
+        }
+
+        uint256 mineFee = _mineStepFee();
+        vm.prank(alice);
+        game.placeMyBoardStep{value: mineFee}(matchId);
+        processAllOperations();
+        assertEq(game.getPlacementShipsDone(matchId, 0), 0, "ships done should reset once the round commits");
+    }
+
+    /// @dev None of the ship steps reveal anything: placementPending only
+    /// becomes true on the final step, so confirmPlacement has nothing to
+    /// confirm yet and reverts on every intermediate step.
+    function testPlacementIntermediateStepsRevealNothing() public {
+        uint256 matchId = _createAndJoinMatch(alice, bob);
+        uint256 shipFee = _shipStepFee();
+
+        for (uint8 i = 0; i < NUM_SHIPS; i++) {
+            vm.prank(alice);
+            game.placeMyBoardStep{value: shipFee}(matchId);
+            processAllOperations();
+
+            vm.expectRevert("no pending placement");
+            game.confirmPlacement(
+                matchId, 0, DecryptionAttestation({handle: bytes32(0), value: bytes32(0)}), new bytes[](0)
+            );
+        }
     }
 
     /// @dev confirmPlacement takes an explicit playerIdx and authorizes via
@@ -119,11 +199,7 @@ contract PlacementTest is IncoTest {
     /// behalf) can submit it.
     function testConfirmPlacementCanBeSubmittedByAThirdParty() public {
         uint256 matchId = _createAndJoinMatch(alice, bob);
-        uint256 fee = _placementFee();
-
-        vm.prank(alice);
-        game.placeMyBoard{value: fee}(matchId);
-        processAllOperations();
+        _runAllPlacementSteps(matchId, alice);
 
         bytes32 handle = game.getPendingPlacementHandle(matchId, 0);
         // carol requests the attestation and submits it, alice never calls
@@ -178,9 +254,15 @@ contract PlacementTest is IncoTest {
         // point is not payable.
         vm.deal(address(game), 1 ether);
 
-        vm.prank(alice);
-        game.forcePlacementFailureForTesting(matchId, 0);
-        processAllOperations();
+        // One forced-failure step per ship, then the mines and reveal step,
+        // exactly the sequence a real caller drives through placeMyBoardStep,
+        // every one of them starting from (and staying on) a fully occupied
+        // board so every attempt collides.
+        for (uint8 i = 0; i < NUM_SHIPS + 1; i++) {
+            vm.prank(alice);
+            game.forcePlacementFailureStepForTesting(matchId, 0);
+            processAllOperations();
+        }
 
         bytes32 handle = game.getPendingPlacementHandle(matchId, 0);
         (DecryptionAttestation memory att, bytes[] memory sigs) =
