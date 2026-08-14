@@ -1,0 +1,161 @@
+/*
+ * Ciphertide design tokens.
+ *
+ * Theme: a deep-sea naval war room, a submarine sonar console. The player
+ * sits in dark water reading instruments, not browsing a dashboard. Every
+ * token below exists because something in that room needs it: a panel
+ * face, a grid line, the live glow of an active sonar return, the ember
+ * flare of a confirmed hit.
+ *
+ * Palette logic: Inco's brand blue (#1B3E86) is structure, not light.
+ * It builds the console frame, the panels, the grid. #3673F5 is the one
+ * thing on the console that is ALIVE: a sonar return, the decrypt
+ * shimmer, the active cell, the primary action. It stays rare so it
+ * always reads as "this is live right now". Text runs cold, from a
+ * muted instrument-label blue up to a bright near-white blue. The ember
+ * (#FF5A36-ish molten flare) is the one warm color in the whole system,
+ * reserved strictly for hits, damage and alerts, so a hit visually
+ * detonates against an otherwise all-cold field.
+ */
+
+:root {
+  /* ---------------------------------------------------------------
+   * Color: base surfaces (the water and the hull)
+   * --------------------------------------------------------------- */
+  --ct-color-abyss: #05070d; /* near-black deep sea, the page base */
+  --ct-color-deep: #0b1730; /* deep desaturated navy, panel fill */
+  --ct-color-deep-raised: #0f1c3a; /* a panel sitting slightly above deep */
+  --ct-color-deep-sunken: #030509; /* recessed wells, the grid trench */
+
+  /* Structure: Inco blue used as build material, not illumination. */
+  --ct-color-structure: #1b3e86;
+  --ct-color-structure-soft: rgba(27, 62, 134, 0.42);
+  --ct-color-structure-faint: rgba(27, 62, 134, 0.18);
+
+  /* The live glow: sonar return, decrypt shimmer, active state. */
+  --ct-color-glow: #3673f5;
+  --ct-color-glow-bright: #6f9bff;
+  --ct-color-glow-soft: rgba(54, 115, 245, 0.32);
+  --ct-color-glow-faint: rgba(54, 115, 245, 0.12);
+
+  /* Cold text, muted instrument label to bright direct readout. */
+  --ct-color-text-bright: #e7eefe;
+  --ct-color-text-muted: #8eb1f9;
+  --ct-color-text-dim: #4d6291;
+  --ct-color-text-faint: #2c3c60;
+
+  /* The one warm color: molten flare, never a soft amber, never a flat
+   * error red. This is fire and impact, not a UI warning chip. */
+  --ct-color-ember: #ff5a36;
+  --ct-color-ember-bright: #ff8a5c;
+  --ct-color-ember-soft: rgba(255, 90, 54, 0.35);
+  --ct-color-ember-faint: rgba(255, 90, 54, 0.14);
+
+  /* ---------------------------------------------------------------
+   * Color: semantic layer, build the rest of the app on these names
+   * --------------------------------------------------------------- */
+  --ct-bg-base: var(--ct-color-abyss);
+  --ct-bg-panel: var(--ct-color-deep);
+  --ct-bg-panel-raised: var(--ct-color-deep-raised);
+  --ct-bg-well: var(--ct-color-deep-sunken);
+
+  --ct-border: var(--ct-color-structure-soft);
+  --ct-border-faint: var(--ct-color-structure-faint);
+  --ct-border-strong: var(--ct-color-structure);
+  --ct-border-live: var(--ct-color-glow);
+
+  --ct-accent: var(--ct-color-glow);
+  --ct-accent-bright: var(--ct-color-glow-bright);
+  --ct-accent-soft: var(--ct-color-glow-soft);
+  --ct-accent-faint: var(--ct-color-glow-faint);
+
+  --ct-hit: var(--ct-color-ember);
+  --ct-hit-bright: var(--ct-color-ember-bright);
+  --ct-hit-soft: var(--ct-color-ember-soft);
+  --ct-hit-faint: var(--ct-color-ember-faint);
+
+  --ct-text-primary: var(--ct-color-text-bright);
+  --ct-text-secondary: var(--ct-color-text-muted);
+  --ct-text-tertiary: var(--ct-color-text-dim);
+  --ct-text-ghost: var(--ct-color-text-faint);
+  --ct-text-on-accent: #030509;
+  --ct-text-on-ember: #1a0500;
+
+  /* ---------------------------------------------------------------
+   * Type: three faces, each doing one job. Never system-default,
+   * never Inter. Chakra Petch carries the wordmark and titles (an
+   * engineered, cut-corner display face, built for instrument
+   * labeling, not a soft rounded geometric sans). JetBrains Mono
+   * carries every coordinate, glyph and readout, since the grid IS
+   * the interface. IBM Plex Sans carries prose, the one face in the
+   * stack that is allowed to just be legible.
+   * --------------------------------------------------------------- */
+  --ct-font-display: 'Chakra Petch', 'Eurostile', 'Segoe UI', sans-serif;
+  --ct-font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  --ct-font-body: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+
+  /* Type scale, rem based on a 16px root. */
+  --ct-text-2xs: 0.6875rem; /* 11px, dense grid glyphs */
+  --ct-text-xs: 0.75rem; /* 12px, micro labels */
+  --ct-text-sm: 0.8125rem; /* 13px, secondary labels */
+  --ct-text-base: 0.9375rem; /* 15px, body */
+  --ct-text-md: 1.0625rem; /* 17px, emphasized body */
+  --ct-text-lg: 1.25rem; /* 20px, panel headings */
+  --ct-text-xl: 1.75rem; /* 28px, section titles */
+  --ct-text-2xl: 2.5rem; /* 40px, the wordmark */
+
+  --ct-tracking-tight: -0.01em;
+  --ct-tracking-normal: 0em;
+  --ct-tracking-wide: 0.06em;
+  --ct-tracking-wider: 0.14em;
+  --ct-tracking-widest: 0.32em;
+
+  --ct-leading-tight: 1.1;
+  --ct-leading-normal: 1.5;
+  --ct-leading-loose: 1.7;
+
+  /* ---------------------------------------------------------------
+   * Space: 4px base scale
+   * --------------------------------------------------------------- */
+  --ct-space-1: 0.25rem;
+  --ct-space-2: 0.5rem;
+  --ct-space-3: 0.75rem;
+  --ct-space-4: 1rem;
+  --ct-space-5: 1.5rem;
+  --ct-space-6: 2rem;
+  --ct-space-7: 3rem;
+  --ct-space-8: 4rem;
+
+  /* ---------------------------------------------------------------
+   * Radii: kept small and cut, an instrument panel is milled, not
+   * moulded. Nothing here should read as a soft SaaS rounded-2xl card.
+   * --------------------------------------------------------------- */
+  --ct-radius-sm: 2px;
+  --ct-radius-md: 3px;
+  --ct-radius-lg: 6px;
+
+  /* ---------------------------------------------------------------
+   * Motion: two distinct rhythms. Sonar is slow and deliberate, the
+   * room breathing. Decrypt is a snap, a lock, because a resolving
+   * cell is information landing, not a screen easing in.
+   * --------------------------------------------------------------- */
+  --ct-ease-sonar: cubic-bezier(0.45, 0, 0.2, 1);
+  --ct-ease-decrypt: cubic-bezier(0.16, 1, 0.3, 1);
+  --ct-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --ct-duration-scramble-tick: 130ms; /* how often a hidden glyph mutates */
+  --ct-duration-decrypt: 640ms; /* full scramble-to-resolve transition */
+  --ct-duration-resolve-flash: 420ms; /* the punch at lock-in */
+  --ct-duration-sonar-sweep: 4800ms; /* one full sweep loop */
+  --ct-duration-fast: 160ms;
+  --ct-duration-standard: 240ms;
+
+  /* ---------------------------------------------------------------
+   * Elevation and glow: used sparingly, an instrument's own light,
+   * not a drop shadow under a floating card.
+   * --------------------------------------------------------------- */
+  --ct-glow-accent: 0 0 0 1px var(--ct-color-glow-soft), 0 0 18px var(--ct-color-glow-soft);
+  --ct-glow-ember: 0 0 0 1px var(--ct-color-ember-soft), 0 0 22px var(--ct-color-ember-soft);
+  --ct-shadow-well: inset 0 1px 6px rgba(0, 0, 0, 0.6);
+  --ct-shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.02), 0 12px 32px rgba(0, 0, 0, 0.55);
+}

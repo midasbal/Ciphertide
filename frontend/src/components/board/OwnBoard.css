@@ -1,0 +1,61 @@
+.own-board {
+  display: grid;
+  gap: 1px;
+  background: var(--ct-border-faint);
+  border: 1px solid var(--ct-border);
+  padding: 1px;
+  border-radius: var(--ct-radius-sm);
+  box-shadow: var(--ct-shadow-well);
+}
+
+.own-cell {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: var(--ct-bg-well);
+  position: relative;
+}
+
+.own-cell--hull {
+  background: var(--ct-color-structure);
+  box-shadow: inset 0 0 0 1px rgba(231, 238, 254, 0.12);
+}
+
+.own-cell--struck {
+  background: var(--ct-bg-panel);
+}
+
+.own-cell--struck::after {
+  content: '';
+  position: absolute;
+  inset: 38%;
+  border-radius: 50%;
+  background: var(--ct-text-tertiary);
+  opacity: 0.6;
+}
+
+.own-cell--mine::after {
+  content: '';
+  position: absolute;
+  inset: 26%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--ct-hit-bright), var(--ct-hit) 70%);
+  box-shadow: 0 0 8px var(--ct-hit-soft);
+}
+
+.own-cell--damaged {
+  background: var(--ct-hit);
+  box-shadow: var(--ct-glow-ember);
+}
+
+.own-cell--damaged::before {
+  content: '✕';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--ct-font-mono);
+  font-size: 0.7em;
+  color: var(--ct-text-on-ember);
+  font-weight: 700;
+}

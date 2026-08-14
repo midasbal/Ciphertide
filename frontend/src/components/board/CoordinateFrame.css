@@ -1,0 +1,46 @@
+.coord-frame {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr;
+  grid-template-rows: 1.4rem 1fr;
+  gap: 2px;
+}
+
+.coord-frame-corner {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.coord-frame-cols {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  align-items: end;
+}
+
+.coord-frame-cols span {
+  text-align: center;
+  font-family: var(--ct-font-mono);
+  font-size: var(--ct-text-2xs);
+  color: var(--ct-text-tertiary);
+  letter-spacing: var(--ct-tracking-normal);
+}
+
+.coord-frame-rows {
+  grid-column: 1;
+  grid-row: 2;
+  display: grid;
+}
+
+.coord-frame-rows span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--ct-font-mono);
+  font-size: var(--ct-text-2xs);
+  color: var(--ct-text-tertiary);
+}
+
+.coord-frame-body {
+  grid-column: 2;
+  grid-row: 2;
+}

@@ -1,4 +1,4 @@
-// Mirrors the constants on Battleship.sol. Keep these in sync with the
+// Mirrors the constants on Ciphertide.sol. Keep these in sync with the
 // contract if the fleet, board size, or skill areas ever change.
 export const BOARD_SIZE = 15
 export const SONAR_AREA_SIZE = 5

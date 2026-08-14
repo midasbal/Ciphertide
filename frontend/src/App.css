@@ -2,6 +2,21 @@ main {
   max-width: 640px;
   margin: 4rem auto;
   padding: 0 1.5rem;
-  font-family: system-ui, sans-serif;
-  line-height: 1.5;
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+}
+
+main h1 {
+  font-size: var(--ct-text-2xl);
+  letter-spacing: var(--ct-tracking-widest);
+  margin-bottom: var(--ct-space-4);
+}
+
+main p {
+  margin-bottom: var(--ct-space-4);
+}
+
+main code {
+  font-family: var(--ct-font-mono);
+  color: var(--ct-accent-bright);
 }

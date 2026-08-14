@@ -11,16 +11,13 @@ function App() {
 
   return (
     <main>
-      <h1>Confidential Battleship</h1>
+      <h1>Ciphertide</h1>
       <p>
-        Onchain 1v1 Battleship on Base Sepolia, built with Inco Lightning
-        (FHE). Wallet and live contract wiring are not implemented yet, this
-        demonstrates the Sonar and Barrage aiming preview only.
+        A confidential onchain naval duel on Base Sepolia, built with Inco Lightning. Wallet and live contract
+        wiring are not implemented yet, this demonstrates the Sonar and Barrage aiming preview only. See the visual
+        identity sample at <code>/?screen=match</code>.
       </p>
-      <p>
-        Select a skill, then hover the opponent's sea to preview the area it
-        would cover before committing.
-      </p>
+      <p>Select a skill, then hover the opponent's sea to preview the area it would cover before committing.</p>
       <OpponentSeaBoard onUseSkill={handleUseSkill} />
     </main>
   )

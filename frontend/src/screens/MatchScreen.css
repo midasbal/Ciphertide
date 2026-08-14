@@ -1,0 +1,238 @@
+.match-screen {
+  position: relative;
+  min-height: 100vh;
+  max-width: 74rem;
+  margin: 0 auto;
+  padding: var(--ct-space-6) var(--ct-space-5) var(--ct-space-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-6);
+}
+
+/* ---------------------------------------------------------------
+ * Header: the wordmark and match identity
+ * --------------------------------------------------------------- */
+
+.console-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ct-space-2) var(--ct-space-4);
+  padding-bottom: var(--ct-space-4);
+  border-bottom: 1px solid var(--ct-border);
+}
+
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ct-space-3);
+}
+
+.wordmark-glyph {
+  font-family: var(--ct-font-mono);
+  font-size: var(--ct-text-xl);
+  color: var(--ct-accent);
+  text-shadow: 0 0 16px var(--ct-accent-soft);
+}
+
+.wordmark-text {
+  font-family: var(--ct-font-display);
+  font-weight: 600;
+  font-size: clamp(1.5rem, 6vw, var(--ct-text-2xl));
+  letter-spacing: var(--ct-tracking-widest);
+  color: var(--ct-text-primary);
+  text-shadow: 0 0 24px var(--ct-accent-faint);
+}
+
+.console-header-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-space-2);
+  color: var(--ct-text-secondary);
+  font-size: var(--ct-text-sm);
+}
+
+/* ---------------------------------------------------------------
+ * Status bar: phase, turn, clock, captain
+ * --------------------------------------------------------------- */
+
+.status-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--ct-border-faint);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-md);
+  overflow: hidden;
+}
+
+.status-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-1);
+  padding: var(--ct-space-3) var(--ct-space-4);
+  background: var(--ct-bg-panel);
+}
+
+.status-value {
+  font-family: var(--ct-font-display);
+  font-size: var(--ct-text-md);
+  letter-spacing: var(--ct-tracking-wide);
+  color: var(--ct-text-primary);
+}
+
+.status-value--live {
+  color: var(--ct-accent-bright);
+}
+
+.status-value--accent {
+  color: var(--ct-hit-bright);
+}
+
+/* ---------------------------------------------------------------
+ * Board theater: the two waters, side by side
+ * --------------------------------------------------------------- */
+
+.board-theater {
+  display: grid;
+  /* minmax(0, 1fr), not a bare 1fr: the enemy panel's decrypt readout
+   * line is wide enough to force its own min-content, and a bare 1fr
+   * track cannot shrink below that, which was silently starving the
+   * own-waters column of half its rightful width. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--ct-space-6);
+}
+
+@media (max-width: 860px) {
+  .board-theater {
+    grid-template-columns: 1fr;
+  }
+}
+
+.board-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-4);
+  padding: var(--ct-space-5);
+  background: var(--ct-bg-panel);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-lg);
+  box-shadow: var(--ct-shadow-panel);
+}
+
+.board-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ct-space-3);
+}
+
+.board-panel-head h2 {
+  font-size: var(--ct-text-lg);
+}
+
+.board-panel--enemy {
+  border-color: var(--ct-border-strong);
+}
+
+.enemy-panel-body {
+  position: relative;
+}
+
+/* A slow rotating sonar sweep sitting behind the enemy grid: the room's
+ * one piece of ambient machinery, low opacity, always turning. */
+.sonar-sweep {
+  position: absolute;
+  inset: -6%;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    var(--ct-color-glow-soft) 0deg,
+    transparent 18deg,
+    transparent 360deg
+  );
+  opacity: 0.35;
+  animation: sonar-rotate var(--ct-duration-sonar-sweep) linear infinite;
+  mask-image: radial-gradient(circle, black 55%, transparent 78%);
+}
+
+@keyframes sonar-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Footer: skill dock and sonar log
+ * --------------------------------------------------------------- */
+
+.console-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ct-space-5);
+  padding-top: var(--ct-space-4);
+  border-top: 1px solid var(--ct-border);
+  flex-wrap: wrap;
+}
+
+.skill-dock {
+  display: flex;
+  gap: var(--ct-space-2);
+}
+
+.skill-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-space-2);
+  padding: var(--ct-space-2) var(--ct-space-3);
+  background: var(--ct-bg-panel-raised);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-md);
+}
+
+.skill-chip-label {
+  font-family: var(--ct-font-display);
+  font-size: var(--ct-text-sm);
+  letter-spacing: var(--ct-tracking-wide);
+  color: var(--ct-text-secondary);
+}
+
+.skill-chip-charge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 50%;
+  background: var(--ct-accent-faint);
+  color: var(--ct-accent-bright);
+  font-size: var(--ct-text-xs);
+  border: 1px solid var(--ct-border-live);
+}
+
+.sonar-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-1);
+  font-size: var(--ct-text-2xs);
+  text-align: right;
+}
+
+.sonar-log-line {
+  color: var(--ct-text-tertiary);
+}
+
+.sonar-log-line--hit {
+  color: var(--ct-hit-bright);
+}
+
+.sonar-log-line--miss {
+  color: var(--ct-text-secondary);
+}
+
+.sonar-log-line--live {
+  color: var(--ct-accent-bright);
+}
