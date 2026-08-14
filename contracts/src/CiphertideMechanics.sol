@@ -2,7 +2,7 @@
 pragma solidity ^0.8.29;
 
 import {euint256, ebool, e} from "@inco/lightning/src/Lib.sol";
-import {PlayerSlot} from "./CiphertideTypes.sol";
+import {PlayerSlot, AreaSkillState} from "./CiphertideTypes.sol";
 
 /// @notice Heavy, reusable FHE mechanics factored out of Ciphertide into a
 ///         separately deployed, linked external library, purely to keep
@@ -248,23 +248,27 @@ library CiphertideMechanics {
         }
     }
 
-    /// @dev Resolves a set of already public, already chosen cells against
-    ///      the defender's hidden board: identical resolution shape to
-    ///      resolveChosenStrikes below (one 3 bit result code per cell, no
-    ///      local position needed since the caller already knows every
-    ///      cell), just sized to cells.length instead of Salvo's fixed 3,
-    ///      so it also covers Barrage's randomized 4 to 6 count and
-    ///      Bombardment's and Rake's fixed counts. Whether the shield
-    ///      actually broke is only acted on later, once the caller reveals
-    ///      and decodes the returned packed value, this function only
-    ///      folds the break into the encrypted packing, it never reads or
-    ///      writes shieldActive.
-    function resolveChosenAreaStrikes(uint8[] memory cells, PlayerSlot storage defender)
-        external
-        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
+    /// @dev Shared per-cell result-code computation behind
+    ///      resolveChosenAreaStrikes and resolveAreaStrikeSlice: one 3 bit
+    ///      result code per cell in `cells`, no local position needed since
+    ///      the caller already knows every cell, and no ship damage applied
+    ///      here (see applyAreaShipDamage), only the codes and which cells
+    ///      count as struck. slotOffset places each cell's code at the
+    ///      correct absolute bit position in a packed value that may span
+    ///      more cells than this one call resolves, so a stepped caller
+    ///      resolving cells in chunks across several transactions can OR
+    ///      each chunk's own partial packed value directly into a growing
+    ///      accumulator without the bit positions colliding. Whether the
+    ///      shield actually broke is only acted on later, once the caller
+    ///      reveals and decodes the packed value, this only folds the
+    ///      break into the encrypted packing, it never reads or writes
+    ///      shieldActive.
+    function _resolveCellCodes(uint8[] memory cells, uint8 slotOffset, PlayerSlot storage defender)
+        internal
+        returns (euint256 packed, euint256 struckMask)
     {
-        euint256 struckMask = e.asEuint256(uint256(0));
         packed = e.asEuint256(uint256(0));
+        struckMask = e.asEuint256(uint256(0));
 
         for (uint256 k = 0; k < cells.length; k++) {
             uint256 shotBit = uint256(1) << cells[k];
@@ -276,13 +280,138 @@ library CiphertideMechanics {
             );
             euint256 code = shieldBreak.select(e.asEuint256(uint256(4)), normalCode);
 
-            packed = packed.or(code.shl(uint256(k) * 3));
+            packed = packed.or(code.shl(uint256(slotOffset + k) * 3));
 
             ebool countsAsStruck = shieldBreak.not();
             struckMask = struckMask.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
         }
+    }
 
+    /// @dev Resolves a set of already public, already chosen cells against
+    ///      the defender's hidden board in one pass: cell codes plus ship
+    ///      damage applied immediately, for a skill that always fits in a
+    ///      single transaction (Barrage and Rake, via their shared caller
+    ///      in Ciphertide.sol). Sized to cells.length instead of a fixed
+    ///      count, so it covers Barrage's randomized 4 to 6 cells and
+    ///      Rake's fixed 3 alike. Bombardment strikes more cells than fits
+    ///      safely in one transaction and instead calls
+    ///      resolveAreaStrikeSlice per chunk and applyAreaShipDamage once
+    ///      at the end, see Ciphertide.useBombardment's own comment.
+    function resolveChosenAreaStrikes(uint8[] memory cells, PlayerSlot storage defender)
+        external
+        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
+    {
+        euint256 struckMask;
+        (packed, struckMask) = _resolveCellCodes(cells, 0, defender);
         (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckMask);
+    }
+
+    /// @notice Runs one full step of a stepped Bombardment firing sequence:
+    ///         resolves the next chunk of already publicly picked, already
+    ///         stored cells (state.stepsDone through +chunkSize - 1, read
+    ///         straight from the match's own stored cell list rather than
+    ///         the caller building a memory copy first), accumulates this
+    ///         chunk's packed codes and struck mask into state, and
+    ///         advances state.stepsDone. On the chunk that reaches
+    ///         totalCells, also applies ship damage from the now complete
+    ///         struck mask, reveals the packed and win values, and stashes
+    ///         them into state ready for confirmBombardment, mirroring
+    ///         Ciphertide's own _finalizeAreaPending tail for a
+    ///         single-transaction skill. Every piece of this needed a
+    ///         defender or state storage pointer already, so folding the
+    ///         whole step (not just cell-code resolution) into one library
+    ///         call keeps this orchestration out of Ciphertide's own
+    ///         deployed bytecode entirely, only the call itself and the
+    ///         Fired-vs-StepSubmitted branch stay there.
+    /// @dev Splitting cell-code resolution from ship-damage application
+    ///      (only running the full per-ship loop on the final chunk, not
+    ///      every chunk) avoids redundantly re-reading and re-writing the
+    ///      same 6 ship-hit storage slots on every chunk: ship damage only
+    ///      needs to see the complete struck mask once, a partial
+    ///      mid-sequence view of it is meaningless anyway.
+    function stepBombardment(
+        AreaSkillState storage state,
+        uint8[15] storage cells,
+        uint8 stepSize,
+        uint8 totalCells,
+        PlayerSlot storage defender
+    ) external returns (bool finished, uint8 done, ebool allDestroyed) {
+        uint8 doneBefore = state.stepsDone;
+        uint8 remaining = totalCells - doneBefore;
+        uint8 chunkSize = remaining < stepSize ? remaining : stepSize;
+
+        euint256 stepPacked = e.asEuint256(uint256(0));
+        euint256 stepStruck = e.asEuint256(uint256(0));
+        for (uint8 k = 0; k < chunkSize; k++) {
+            uint256 shotBit = uint256(1) << cells[doneBefore + k];
+            ebool shieldBreak = defender.shieldActive ? defender.shieldCellMask.eq(shotBit) : e.asEbool(false);
+            ebool isMine = defender.mineMask.and(shotBit).ne(uint256(0)).and(shieldBreak.not());
+            ebool isShipHit = defender.boardMask.and(shotBit).ne(uint256(0)).and(shieldBreak.not());
+            euint256 normalCode = isMine.select(
+                e.asEuint256(uint256(3)), isShipHit.select(e.asEuint256(uint256(2)), e.asEuint256(uint256(1)))
+            );
+            euint256 code = shieldBreak.select(e.asEuint256(uint256(4)), normalCode);
+
+            stepPacked = stepPacked.or(code.shl(uint256(doneBefore + k) * 3));
+
+            ebool countsAsStruck = shieldBreak.not();
+            stepStruck = stepStruck.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
+        }
+
+        euint256 packedSoFar = state.packed.or(stepPacked);
+        euint256 struckSoFar = state.struckSoFar.or(stepStruck);
+        packedSoFar.allowThis();
+        struckSoFar.allowThis();
+        state.packed = packedSoFar;
+        state.struckSoFar = struckSoFar;
+
+        done = doneBefore + chunkSize;
+        finished = done >= totalCells;
+        state.stepsDone = finished ? 0 : done;
+
+        if (finished) {
+            euint256 newlyDestroyed;
+            (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckSoFar);
+            allDestroyed.allowThis();
+            newlyDestroyed.allowThis();
+            e.reveal(packedSoFar);
+            e.reveal(allDestroyed);
+            e.reveal(newlyDestroyed);
+            defender.lastDestroyedMask = newlyDestroyed;
+            state.allDestroyed = allDestroyed;
+        }
+    }
+
+    /// @notice Copies count cells out of a match's stored cell list into a
+    ///         memory array, for Ciphertide.useBombardment's final step to
+    ///         build the BombardmentFired event's cell list from storage
+    ///         (the original memory array pickAreaCells returned only
+    ///         lived in the opening step's own call, long gone by the
+    ///         final step). Pulled into the library purely to keep this
+    ///         copying loop's bytecode out of Ciphertide's own deployed
+    ///         size, the same reasoning as stepBombardment reading storage
+    ///         directly.
+    function copyCells(uint8[15] storage cells, uint8 count) external view returns (uint8[] memory result) {
+        result = new uint8[](count);
+        for (uint8 k = 0; k < count; k++) {
+            result[k] = cells[k];
+        }
+    }
+
+    /// @notice Folds a fully accumulated struck mask, every cell across
+    ///         every chunk of a strike, single-transaction or stepped
+    ///         alike, into the defender's ship hit tracking in one pass.
+    /// @dev The same tail half resolveChosenAreaStrikes runs inline for a
+    ///      single-transaction skill, exposed as its own external entry
+    ///      point so a stepped skill's final chunk (Bombardment, Carpet)
+    ///      can call it once, after every earlier chunk's own struck mask
+    ///      has already been OR'd into the accumulator the caller passes
+    ///      in here.
+    function applyAreaShipDamage(PlayerSlot storage defender, euint256 struckMask)
+        external
+        returns (euint256 newlyDestroyed, ebool allDestroyed)
+    {
+        return _applyAreaShipDamage(defender, struckMask);
     }
 
     /// @dev Folds the struck cells into each ship's hit tracking and
@@ -372,27 +501,57 @@ library CiphertideMechanics {
     // struck, from the anchor alone.
     // ---------------------------------------------------------------
 
+    /// @notice Computes Carpet's "any ship cell inside the aimed 3x3" gate
+    ///         once, up front: gates every one of the 9 slots identically,
+    ///         when false every slot's code stays 0 (inactive) regardless
+    ///         of what actually occupies each cell, so a whiff's packed
+    ///         result decodes to nothing struck and nothing logged, with
+    ///         no separate reveal of the trigger itself needed. The
+    ///         caller (Ciphertide.useCarpet) stores this ebool and passes
+    ///         it back into every chunk of resolveCarpetStrikeSlice, so
+    ///         every slot across every chunk is gated by the exact same
+    ///         computation regardless of which step resolves it.
     /// @dev area.width and area.height are always 3 for Carpet, checked by
-    ///      the caller before this runs; kept as AreaGeometry fields
+    ///      the caller before this runs; kept as an AreaGeometry field
     ///      purely to reuse _rectMaskPlain rather than hardcoding 3 twice.
-    ///      shipPresent gates every one of the 9 slots identically: when
-    ///      it is false every slot's code stays 0 (inactive) regardless of
-    ///      what actually occupies each cell, so a whiff's packed result
-    ///      decodes to nothing struck and nothing logged, with no separate
-    ///      reveal of the trigger itself needed, the silent whiff falls
-    ///      straight out of the same packing and apply path every other
-    ///      multi-cell skill already uses.
-    function resolveCarpetStrike(AreaGeometry memory area, PlayerSlot storage defender)
+    function beginCarpetShipPresent(AreaGeometry memory area, PlayerSlot storage defender)
         external
-        returns (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed)
+        returns (ebool shipPresent)
     {
         uint256 areaMaskPlain = _rectMaskPlain(area.anchorRow, area.anchorCol, area.height, area.width);
-        ebool shipPresent = defender.boardMask.and(areaMaskPlain).ne(uint256(0));
+        shipPresent = defender.boardMask.and(areaMaskPlain).ne(uint256(0));
+    }
 
-        euint256 struckMask = e.asEuint256(uint256(0));
-        packed = e.asEuint256(uint256(0));
+    /// @notice Runs one full step of a stepped Carpet firing sequence, the
+    ///         same shape stepBombardment uses: resolves the next chunk of
+    ///         the 9 fixed local slots (state.stepsDone through +chunkSize
+    ///         - 1), gated by shipPresent (computed once up front by
+    ///         beginCarpetShipPresent and passed back in unchanged every
+    ///         step), accumulates into state, advances state.stepsDone,
+    ///         and on the chunk that reaches CARPET_CELL_COUNT also applies
+    ///         ship damage, reveals the packed and win values, and stashes
+    ///         them into state ready for confirmCarpet. Packs one 3 bit
+    ///         result code per cell (0 inactive, 1 miss, 2 ship hit, 3
+    ///         mine, 4 shield break) at bit position startSlot + i, no
+    ///         local position bits beyond that needed: like Salvo, the
+    ///         caller already knows every cell a firing carpet struck, from
+    ///         the anchor alone.
+    function stepCarpet(
+        AreaSkillState storage state,
+        AreaGeometry memory area,
+        uint8 stepSize,
+        uint8 totalCells,
+        PlayerSlot storage defender
+    ) external returns (bool finished, uint8 done, ebool allDestroyed) {
+        ebool shipPresent = state.carpetShipPresent;
+        uint8 doneBefore = state.stepsDone;
+        uint8 remaining = totalCells - doneBefore;
+        uint8 chunkSize = remaining < stepSize ? remaining : stepSize;
 
-        for (uint8 localPos = 0; localPos < 9; localPos++) {
+        euint256 stepPacked = e.asEuint256(uint256(0));
+        euint256 stepStruck = e.asEuint256(uint256(0));
+        for (uint8 i = 0; i < chunkSize; i++) {
+            uint8 localPos = doneBefore + i;
             uint256 globalCell = (uint256(area.anchorRow) + localPos / area.width) * BOARD_SIZE
                 + (uint256(area.anchorCol) + localPos % area.width);
             uint256 shotBit = uint256(1) << globalCell;
@@ -407,12 +566,33 @@ library CiphertideMechanics {
             euint256 code =
                 shipPresent.select(shieldBreak.select(e.asEuint256(uint256(4)), normalCode), e.asEuint256(uint256(0)));
 
-            packed = packed.or(code.shl(uint256(localPos) * 3));
+            stepPacked = stepPacked.or(code.shl(uint256(localPos) * 3));
 
             ebool countsAsStruck = shipPresent.and(shieldBreak.not());
-            struckMask = struckMask.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
+            stepStruck = stepStruck.or(countsAsStruck.select(e.asEuint256(shotBit), e.asEuint256(uint256(0))));
         }
 
-        (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckMask);
+        euint256 packedSoFar = state.packed.or(stepPacked);
+        euint256 struckSoFar = state.struckSoFar.or(stepStruck);
+        packedSoFar.allowThis();
+        struckSoFar.allowThis();
+        state.packed = packedSoFar;
+        state.struckSoFar = struckSoFar;
+
+        done = doneBefore + chunkSize;
+        finished = done >= totalCells;
+        state.stepsDone = finished ? 0 : done;
+
+        if (finished) {
+            euint256 newlyDestroyed;
+            (newlyDestroyed, allDestroyed) = _applyAreaShipDamage(defender, struckSoFar);
+            allDestroyed.allowThis();
+            newlyDestroyed.allowThis();
+            e.reveal(packedSoFar);
+            e.reveal(allDestroyed);
+            e.reveal(newlyDestroyed);
+            defender.lastDestroyedMask = newlyDestroyed;
+            state.allDestroyed = allDestroyed;
+        }
     }
 }

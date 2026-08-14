@@ -161,6 +161,36 @@ contract CiphertideTest is IncoTest {
         packedValue = uint256(packedAtt.value);
     }
 
+    /// @dev Runs every step of a Bombardment firing sequence for player in
+    /// order, the same sequence a real caller drives across several
+    /// separate transactions with the same anchor each time (see
+    /// Ciphertide.useBombardment's own comment), mirroring
+    /// PlacementTest._runAllPlacementSteps. Step count is read from the
+    /// contract's own constants rather than hardcoded, so this stays
+    /// correct if BOMBARDMENT_STEP_SIZE is ever retuned.
+    function _runBombardmentSteps(uint256 matchId, uint8 anchorRow, uint8 anchorCol, address player) internal {
+        uint8 stepSize = game.BOMBARDMENT_STEP_SIZE();
+        uint8 total = game.BOMBARDMENT_STRIKE_COUNT();
+        uint8 stepsNeeded = (total + stepSize - 1) / stepSize;
+        for (uint8 i = 0; i < stepsNeeded; i++) {
+            vm.prank(player);
+            game.useBombardment(matchId, anchorRow, anchorCol);
+            processAllOperations();
+        }
+    }
+
+    /// @dev Same as _runBombardmentSteps, for Carpet.
+    function _runCarpetSteps(uint256 matchId, uint8 anchorRow, uint8 anchorCol, address player) internal {
+        uint8 stepSize = game.CARPET_STEP_SIZE();
+        uint8 total = game.CARPET_CELL_COUNT();
+        uint8 stepsNeeded = (total + stepSize - 1) / stepSize;
+        for (uint8 i = 0; i < stepsNeeded; i++) {
+            vm.prank(player);
+            game.useCarpet(matchId, anchorRow, anchorCol);
+            processAllOperations();
+        }
+    }
+
     function _confirmPendingRake(uint256 matchId, address requester) internal returns (uint256 packedValue) {
         (bytes32 packedHandle, bytes32 allDestroyedHandle) = game.getPendingAreaHandles(matchId);
         (DecryptionAttestation memory packedAtt, bytes[] memory packedSigs) =
@@ -445,20 +475,36 @@ contract CiphertideTest is IncoTest {
         console.log("useBarrage() gas used (0 confidential draws, public cell pick):", gasUsed);
     }
 
-    function testBombardmentGasUsage() public {
+    /// @dev Proves each stepped useBombardment call stays comfortably
+    /// under Base's protocol level per-transaction gas cap (EIP-7825,
+    /// 2^24 = 16,777,216 gas): resolving all 15 cells in one transaction
+    /// was measured at roughly 24 million gas before this skill was
+    /// split into steps, well past that cap, the reason it could not run
+    /// at all. Mirrors PlacementTest.testPlacementStepGasUsage's own
+    /// per-step gas assertion.
+    function testBombardmentStepGasUsage() public {
         (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
         uint256 matchId = _setupInProgressMatch(alice, bob, board0, ships0);
         if (game.getTurn(matchId) != bob) {
             _passTurnWithMiss(matchId, alice, 200);
         }
 
-        vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        uint256 gasBefore = gasleft();
-        game.useBombardment(matchId, 0, 0);
-        uint256 gasUsed = gasBefore - gasleft();
+        uint8 stepSize = game.BOMBARDMENT_STEP_SIZE();
+        uint8 total = game.BOMBARDMENT_STRIKE_COUNT();
+        uint8 stepsNeeded = (total + stepSize - 1) / stepSize;
 
-        console.log("useBombardment() gas used (0 confidential draws, public cell pick):", gasUsed);
+        vm.deal(bob, 1 ether);
+        for (uint8 i = 0; i < stepsNeeded; i++) {
+            vm.prank(bob);
+            uint256 gasBefore = gasleft();
+            game.useBombardment(matchId, 0, 0);
+            uint256 gasUsed = gasBefore - gasleft();
+            console.log("useBombardment() step gas used:", gasUsed);
+            assertLt(
+                gasUsed, 14_000_000, "a bombardment step must stay comfortably under the 16,777,216 per-tx gas cap"
+            );
+            processAllOperations();
+        }
     }
 
     function testRakeGasUsage() public {
@@ -1309,10 +1355,8 @@ contract CiphertideTest is IncoTest {
             _passTurnWithMiss(matchId, alice, 200);
         }
 
-        vm.prank(bob);
-        game.useBombardment(matchId, 0, 0);
+        _runBombardmentSteps(matchId, 0, 0, bob);
         uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
-        processAllOperations();
         _confirmPendingBombardment(matchId, bob);
 
         assertEq(cells.length, game.BOMBARDMENT_STRIKE_COUNT(), "bombardment should always strike exactly 15 cells");
@@ -1337,9 +1381,7 @@ contract CiphertideTest is IncoTest {
         uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
 
         vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        game.useBombardment(matchId, 0, 0);
-        processAllOperations();
+        _runBombardmentSteps(matchId, 0, 0, bob);
         _confirmPendingBombardment(matchId, bob);
 
         assertEq(game.getTurn(matchId), alice, "bombardment is the whole action for the turn, it should pass");
@@ -1418,11 +1460,9 @@ contract CiphertideTest is IncoTest {
             assertEq(game.getTurn(matchId), bob, "five hits in a row should keep bob's turn");
 
             vm.deal(bob, 1 ether);
-            vm.prank(bob);
             // Anchored at (0,0), the 10x10 area covers cell 5 (row 0, col 5)
             // among 99 others.
-            game.useBombardment(matchId, 0, 0);
-            processAllOperations();
+            _runBombardmentSteps(matchId, 0, 0, bob);
             _confirmPendingBombardment(matchId, bob);
 
             if (game.getPhase(matchId) != Ciphertide.Phase.Finished) continue;
@@ -1461,9 +1501,7 @@ contract CiphertideTest is IncoTest {
         processAllOperations();
 
         vm.deal(bob, 1 ether);
-        vm.prank(bob);
-        game.useBombardment(matchId, 0, 0);
-        processAllOperations();
+        _runBombardmentSteps(matchId, 0, 0, bob);
         uint256 packed = _confirmPendingBombardment(matchId, bob);
 
         uint256 mineCount = 0;
@@ -1511,10 +1549,8 @@ contract CiphertideTest is IncoTest {
             // alice's board. Cell 100 is water on both test boards.
             _passTurnWithMiss(matchId, alice, 100);
 
-            vm.prank(bob);
-            game.useBombardment(matchId, 0, 0);
+            _runBombardmentSteps(matchId, 0, 0, bob);
             uint8[] memory cells = game.getPendingAreaCellsForTesting(matchId);
-            processAllOperations();
             uint256 packed = _confirmPendingBombardment(matchId, bob);
 
             uint256 breakCount = 0;
@@ -2128,9 +2164,7 @@ contract CiphertideTest is IncoTest {
         }
         uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
 
-        vm.prank(alice);
-        game.useCarpet(matchId, 0, 0);
-        processAllOperations();
+        _runCarpetSteps(matchId, 0, 0, alice);
         uint256 packed = _confirmPendingCarpet(matchId, alice);
 
         assertEq(_decodeCarpetSlot(packed, 0), 2, "cell 0 is a real ship, should resolve as a hit");
@@ -2151,7 +2185,13 @@ contract CiphertideTest is IncoTest {
         );
     }
 
-    function testCarpetGasUsage() public {
+    /// @dev Proves each stepped useCarpet call stays comfortably under
+    /// Base's protocol level per-transaction gas cap (EIP-7825, 2^24 =
+    /// 16,777,216 gas): resolving all 9 cells in one transaction was
+    /// measured at roughly 18.45 million gas before this skill was split
+    /// into steps, past that cap, the reason it could not run at all.
+    /// Mirrors testBombardmentStepGasUsage.
+    function testCarpetStepGasUsage() public {
         uint8 carpetCaptain = game.CAPTAIN_CARPET();
         uint8 shieldCaptain = game.CAPTAIN_SHIELD();
         (uint256 board0, uint256[6] memory ships0) = _standardTestBoard();
@@ -2161,11 +2201,19 @@ contract CiphertideTest is IncoTest {
             _passTurnWithMiss(matchId, bob, 200);
         }
 
-        vm.prank(alice);
-        uint256 gasBefore = gasleft();
-        game.useCarpet(matchId, 0, 0);
-        uint256 gasUsed = gasBefore - gasleft();
-        console.log("useCarpet() gas used (9 fixed cells, no random draws):", gasUsed);
+        uint8 stepSize = game.CARPET_STEP_SIZE();
+        uint8 total = game.CARPET_CELL_COUNT();
+        uint8 stepsNeeded = (total + stepSize - 1) / stepSize;
+
+        for (uint8 i = 0; i < stepsNeeded; i++) {
+            vm.prank(alice);
+            uint256 gasBefore = gasleft();
+            game.useCarpet(matchId, 0, 0);
+            uint256 gasUsed = gasBefore - gasleft();
+            console.log("useCarpet() step gas used:", gasUsed);
+            assertLt(gasUsed, 14_000_000, "a carpet step must stay comfortably under the 16,777,216 per-tx gas cap");
+            processAllOperations();
+        }
     }
 
     /// @dev Anchor (10, 10) covers cells 160, 161, 162, 175, 176, 177, 190,
@@ -2185,9 +2233,7 @@ contract CiphertideTest is IncoTest {
         }
         uint8 bobIdx = game.getPlayerAddress(matchId, 0) == bob ? 0 : 1;
 
-        vm.prank(alice);
-        game.useCarpet(matchId, 10, 10);
-        processAllOperations();
+        _runCarpetSteps(matchId, 10, 10, alice);
         uint256 packed = _confirmPendingCarpet(matchId, alice);
 
         assertEq(packed, 0, "no ship inside the area, every slot should stay inactive");
@@ -2215,9 +2261,7 @@ contract CiphertideTest is IncoTest {
         }
         uint8 aliceIdx = game.getPlayerAddress(matchId, 0) == alice ? 0 : 1;
 
-        vm.prank(alice);
-        game.useCarpet(matchId, 0, 0);
-        processAllOperations();
+        _runCarpetSteps(matchId, 0, 0, alice);
         _confirmPendingCarpet(matchId, alice);
 
         assertEq(game.getTurn(matchId), bob, "carpet is the whole action for the turn, it should pass");
@@ -2283,9 +2327,7 @@ contract CiphertideTest is IncoTest {
         }
         assertEq(game.getTurn(matchId), alice, "five hits in a row should keep alice's turn");
 
-        vm.prank(alice);
-        game.useCarpet(matchId, 0, 3);
-        processAllOperations();
+        _runCarpetSteps(matchId, 0, 3, alice);
         _confirmPendingCarpet(matchId, alice);
 
         assertEq(uint256(game.getPhase(matchId)), uint256(Ciphertide.Phase.Finished));
@@ -2309,9 +2351,7 @@ contract CiphertideTest is IncoTest {
         game.setMinesForTesting(matchId, bobIdx, uint256(1) << 16, bob);
         processAllOperations();
 
-        vm.prank(alice);
-        game.useCarpet(matchId, 0, 0);
-        processAllOperations();
+        _runCarpetSteps(matchId, 0, 0, alice);
         uint256 packed = _confirmPendingCarpet(matchId, alice);
 
         assertEq(_decodeCarpetSlot(packed, 0), 2, "cell 0 is a real ship, should resolve as a hit");
@@ -2340,9 +2380,7 @@ contract CiphertideTest is IncoTest {
         // Cell 100 is water on both test boards.
         _passTurnWithMiss(matchId, alice, 100);
 
-        vm.prank(bob);
-        game.useCarpet(matchId, 0, 0);
-        processAllOperations();
+        _runCarpetSteps(matchId, 0, 0, bob);
         uint256 packed = _confirmPendingCarpet(matchId, bob);
 
         assertEq(_decodeCarpetSlot(packed, 0), 2, "cell 0 is a real ship, should resolve as a hit");

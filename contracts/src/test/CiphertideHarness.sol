@@ -83,7 +83,7 @@ contract CiphertideHarness is Ciphertide {
         returns (bytes32 packedHandle, bytes32 allDestroyedHandle)
     {
         Match storage m = matches[matchId];
-        return (euint256.unwrap(m.pendingAreaPacked), ebool.unwrap(m.pendingAreaAllDestroyed));
+        return (euint256.unwrap(m.areaSkill.packed), ebool.unwrap(m.areaSkill.allDestroyed));
     }
 
     function hasSkipNextTurn(uint256 matchId, uint8 playerIdx) external view returns (bool) {
@@ -101,5 +101,13 @@ contract CiphertideHarness is Ciphertide {
         for (uint8 k = 0; k < m.pendingAreaCellCount; k++) {
             cells[k] = m.pendingAreaCells[k];
         }
+    }
+
+    /// @dev How many cells of a stepped area skill (Bombardment or Carpet)
+    ///      have been resolved so far this firing sequence, 0 before the
+    ///      first step and once a sequence finishes and fires. Mirrors
+    ///      getPlacementShipsDone for the stepped area skills.
+    function getAreaSkillStepsDone(uint256 matchId) external view returns (uint8) {
+        return matches[matchId].areaSkill.stepsDone;
     }
 }

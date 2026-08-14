@@ -60,3 +60,47 @@ struct PlayerSlot {
     // encrypted flag. Cleared back to false the moment the shield breaks.
     bool shieldActive;
 }
+
+/// @notice Shared pending state for whichever multi-cell area skill
+///         (Barrage, Bombardment, Rake, Carpet) is currently in flight for
+///         a match, never more than one at once (gated by Ciphertide's own
+///         PendingAction). Split out of Ciphertide's own Match struct, the
+///         same reasoning as PlayerSlot above: as a free-standing struct
+///         (not nested inside the Ciphertide contract) this can be passed
+///         to CiphertideMechanics by storage reference, letting the whole
+///         stepped-skill orchestration for Bombardment and Carpet (which
+///         needs to read and write several of these fields together across
+///         several transactions) live in the library instead of
+///         Ciphertide's own deployed bytecode, without a circular import.
+struct AreaSkillState {
+    euint256 packed;
+    ebool allDestroyed;
+    uint8 anchorRow; // barrage, bombardment, rake, carpet only
+    uint8 anchorCol; // barrage, bombardment, rake, carpet only
+    // Bombardment and Carpet strike more cells in one resolution than fits
+    // safely under Base's per-transaction gas cap, so both are split into
+    // a few stepped calls, mirroring PlayerSlot.placementShipsDone's own
+    // step counter. 0 before the first step of a firing sequence and reset
+    // back to 0 once the final step requests the reveal (Ciphertide's
+    // pendingAction stays set to Bombardment or Carpet throughout,
+    // including the "fired, awaiting confirmation" window after the final
+    // step, so stepsDone alone cannot tell "never started" apart from
+    // "just finished firing", see Ciphertide.useBombardment's own comment
+    // for how the two are told apart). Unused by Barrage and Rake, which
+    // always fit in a single transaction.
+    uint8 stepsDone;
+    // Struck-cell mask accumulated across a stepped area skill's steps
+    // (excluding shield breaks), OR'd in by each step from its own
+    // CiphertideMechanics resolve call. Ship damage itself is applied
+    // once, on the final step, from this fully accumulated mask, not per
+    // step: a partial mid-sequence view is meaningless, and repeating the
+    // full per-ship loop on every step would waste gas re-reading and
+    // re-writing the same shipHits storage on every step for no benefit.
+    // Unused by Barrage and Rake.
+    euint256 struckSoFar;
+    // Carpet's "any ship cell inside the aimed 3x3" gate, computed once on
+    // Carpet's first step and reused unchanged by every later step, so
+    // every one of the 9 slots is gated identically regardless of which
+    // step resolves it. Unused by Bombardment, Barrage and Rake.
+    ebool carpetShipPresent;
+}

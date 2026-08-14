@@ -4,7 +4,7 @@ pragma solidity ^0.8.29;
 import {euint256, ebool, e, inco} from "@inco/lightning/src/Lib.sol";
 import {DecryptionAttestation} from "@inco/lightning/src/lightning-parts/DecryptionAttester.types.sol";
 import {asBool} from "@inco/lightning/src/shared/TypeUtils.sol";
-import {PlayerSlot} from "./CiphertideTypes.sol";
+import {PlayerSlot, AreaSkillState} from "./CiphertideTypes.sol";
 import {CiphertideMechanics} from "./CiphertideMechanics.sol";
 
 /// @notice Ciphertide: an onchain hidden-fleet naval duel on Base Sepolia,
@@ -78,6 +78,28 @@ contract Ciphertide {
     uint8 public constant BOMBARDMENT_AREA_SIZE = 10;
     uint8 public constant BOMBARDMENT_STRIKE_COUNT = 15;
 
+    /// Resolving all 15 struck cells in one transaction was projected at
+    /// roughly 24 million gas, well past Base's protocol level per-
+    /// transaction gas cap (EIP-7825, 2^24 = 16,777,216 gas), so
+    /// useBombardment is split into ceil(BOMBARDMENT_STRIKE_COUNT /
+    /// BOMBARDMENT_STEP_SIZE) calls, today 3 (5 cells each), mirroring
+    /// placeMyBoardStep's own stepped design. See useBombardment's own
+    /// comment for the exact call sequence.
+    /// @dev Sized conservatively from this project's own REAL measured gas
+    /// rather than the Foundry mock's own numbers for this same code
+    /// (AreaSkillSteps.t.sol logs those, comfortably under this bound with
+    /// room to spare, but the mock is known to run far cheaper than
+    /// production, the same gap already documented for Barrage's
+    /// eth_estimateGas result in CiphertideClient's own EXPLICIT_GAS_LIMITS
+    /// comment: an early live Barrage call estimated at 1.91 million gas
+    /// and then reverted out of gas, its real measured cost from a
+    /// transaction that actually succeeded was 11.85 million, for 4 to 6
+    /// cells plus a full ship-damage pass). 5 cells per step, damage
+    /// applied only on the final step, keeps every step at or under that
+    /// same proven-safe real shape rather than trusting the mock's
+    /// optimistic numbers for a real per-transaction cap this strict.
+    uint8 public constant BOMBARDMENT_STEP_SIZE = 5;
+
     /// Rake: Captain 3's unique skill, one whole row (BOARD_SIZE cells wide,
     /// a single cell tall), a fixed 3 of its 15 cells are struck. Same
     /// public cell choice as Barrage and Bombardment, just over a 15x1 area
@@ -101,6 +123,24 @@ contract Ciphertide {
     /// and Salvo, Carpet needs no fee.
     uint8 public constant CARPET_AREA_SIZE = 3;
     uint8 public constant CARPET_CELL_COUNT = 9;
+
+    /// Resolving all 9 struck cells in one transaction was projected at
+    /// roughly 18.45 million gas, also past Base's protocol level
+    /// per-transaction gas cap, so useCarpet is split the same way
+    /// useBombardment is, into ceil(CARPET_CELL_COUNT / CARPET_STEP_SIZE)
+    /// calls, today 3 (3 cells each). See useCarpet's own comment for the
+    /// exact call sequence.
+    /// @dev Sized conservatively at 3 cells per step (matching
+    /// BOMBARDMENT_STEP_SIZE's own comment on why the mock's numbers alone
+    /// are not trusted for this), and specifically matched to Salvo's own
+    /// real, currently-working shape: Salvo already strikes exactly 3
+    /// cells plus a full ship-damage pass in one single transaction on
+    /// live Base Sepolia today, through the same shared per-cell
+    /// resolution and damage-application code Carpet's own stepped chunks
+    /// now go through, so a Carpet chunk of the same size and shape is
+    /// grounded in a real, already-proven-safe transaction, not a
+    /// projection.
+    uint8 public constant CARPET_STEP_SIZE = 3;
 
     /// Captain identity, declared per player when entering a match. Every
     /// captain carries the two shared skills, Sonar and Barrage, plus one
@@ -155,15 +195,13 @@ contract Ciphertide {
         ebool pendingMineHit; // shot only
         ebool pendingShieldBreak; // shot only
         ebool pendingSonarResult; // sonar only
-        // Shared by barrage, bombardment, rake, salvo and carpet (never
-        // more than one at once, gated by pendingAction), the per-slot bit
-        // width and encoding differs between the area skills and salvo,
-        // see CiphertideMechanics.resolveAreaStrikes, resolveChosenStrikes
-        // and resolveCarpetStrike.
-        euint256 pendingAreaPacked;
-        ebool pendingAreaAllDestroyed;
-        uint8 pendingAreaAnchorRow; // barrage, bombardment, rake, carpet only
-        uint8 pendingAreaAnchorCol; // barrage, bombardment, rake, carpet only
+        // Shared by barrage, bombardment, rake and carpet (never more than
+        // one at once, gated by pendingAction): the packed result, win
+        // bit, aimed anchor, and (Bombardment and Carpet only) the
+        // stepped-firing progress. See CiphertideTypes.AreaSkillState's own
+        // comment for why this is its own free-standing struct rather than
+        // loose fields here.
+        AreaSkillState areaSkill;
         uint8[3] pendingSalvoCells; // salvo only
         // The cells a public random strike picked (barrage, bombardment,
         // rake only), in the same order their packed result codes are
@@ -226,6 +264,10 @@ contract Ciphertide {
         bytes32 allDestroyedHandle
     );
     event BombardmentResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
+    // Emitted after every intermediate useBombardment call (every call
+    // except the final one, which emits BombardmentFired instead once the
+    // reveal is requested), mirroring PlacementStepSubmitted.
+    event BombardmentStepSubmitted(uint256 indexed matchId, address indexed player, uint8 cellsDone, uint8 totalCells);
     event RakeFired(
         uint256 indexed matchId,
         address indexed player,
@@ -254,6 +296,9 @@ contract Ciphertide {
         bytes32 allDestroyedHandle
     );
     event CarpetResolved(uint256 indexed matchId, uint8 cell, bool hit, bool mine, bool shieldBreak);
+    // Emitted after every intermediate useCarpet call, mirroring
+    // BombardmentStepSubmitted.
+    event CarpetStepSubmitted(uint256 indexed matchId, address indexed player, uint8 cellsDone, uint8 totalCells);
     event ShieldPlaced(uint256 indexed matchId, address indexed player);
     event ShieldBroken(uint256 indexed matchId, address indexed owner, uint8 cell);
     event MatchWon(uint256 indexed matchId, address indexed winner);
@@ -638,13 +683,33 @@ contract Ciphertide {
         }
     }
 
-    /// @dev Shared preamble for any player action (shoot, sonar, barrage):
-    ///      checks phase, turn, that no other action is pending, charges the
-    ///      elapsed decision time against the clock, and resets the clock so
-    ///      the awaiting-confirmation window starts fresh.
+    /// @dev Shared preamble for any player action's OPENING step (shoot,
+    ///      sonar, barrage, and the first call of a stepped skill like
+    ///      Bombardment or Carpet): requires no other action is currently
+    ///      pending, then defers phase, turn and clock bookkeeping to
+    ///      _chargeElapsedTurnTime, shared with a stepped skill's
+    ///      continuation steps below.
     function _beginAction(Match storage m) internal {
-        require(m.phase == Phase.InProgress, "match not in progress");
         require(m.pendingAction == PendingAction.None, "previous action not yet confirmed");
+        _chargeElapsedTurnTime(m);
+    }
+
+    /// @dev The turn-ownership, phase and clock bookkeeping every action
+    ///      needs, split out of _beginAction so a stepped skill's
+    ///      continuation steps (Bombardment, Carpet) can reuse it without
+    ///      also re-requiring pendingAction == None, which is never true
+    ///      mid-sequence: the opening step already set pendingAction to
+    ///      that skill, precisely to gate any OTHER action from starting
+    ///      while this one is still in flight. Checks the match is in
+    ///      progress and it really is the caller's turn (m.turn never
+    ///      moves until a stepped skill's final step resolves, so this
+    ///      alone is what keeps the opponent from acting mid-sequence),
+    ///      charges the elapsed wall-clock time since the last step against
+    ///      that player's remaining budget, and resets the clock so the
+    ///      next step's own elapsed window starts fresh, exactly like a
+    ///      single-transaction action's clock would behave.
+    function _chargeElapsedTurnTime(Match storage m) internal {
+        require(m.phase == Phase.InProgress, "match not in progress");
         require(msg.sender == m.players[m.turn].addr, "not your turn");
 
         uint256 elapsed = block.timestamp - m.lastMoveTimestamp;
@@ -1064,8 +1129,8 @@ contract Ciphertide {
         (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
             CiphertideMechanics.resolveChosenAreaStrikes(cells, defender);
         _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
-        m.pendingAreaAnchorRow = anchorRow;
-        m.pendingAreaAnchorCol = anchorCol;
+        m.areaSkill.anchorRow = anchorRow;
+        m.areaSkill.anchorCol = anchorCol;
         _storePendingAreaCells(m, cells);
 
         m.pendingAction = PendingAction.Barrage;
@@ -1084,48 +1149,93 @@ contract Ciphertide {
     ///         as a shield break instead (no damage, the cell survives,
     ///         the shield is consumed). Single use per match, and the
     ///         player's whole action for the turn.
-    /// @dev Same public cell choice and resolution path as Barrage, just a
-    ///      fixed count (minCells == maxCells == BOMBARDMENT_STRIKE_COUNT)
-    ///      over a larger area, so all 15 slots are always active.
+    /// @dev Resolving all 15 cells in one transaction can exceed Base's
+    ///      protocol level per-transaction gas cap (see
+    ///      BOMBARDMENT_STEP_SIZE's own comment), so this call is stepped:
+    ///      call it repeatedly with the SAME matchId, anchorRow and
+    ///      anchorCol until it stops emitting BombardmentStepSubmitted and
+    ///      emits BombardmentFired instead, exactly like placeMyBoardStep
+    ///      is called NUM_SHIPS + 1 times in a row.
+    ///
+    ///      The opening call (pendingAction is not already Bombardment for
+    ///      this match) does everything a single-transaction call used to
+    ///      do up front except resolve cells: validates turn, captain,
+    ///      area and single use, and picks and stores all 15 cells at once
+    ///      (a cheap, plain public choice, unaffected by stepping, see
+    ///      CiphertideMechanics.pickAreaCells). Every call after that must
+    ///      reuse that exact anchor, checked against the stored one, so a
+    ///      step sequence cannot be redirected partway through, and must
+    ///      come from the same caller (enforced by _chargeElapsedTurnTime's
+    ///      own turn check, since m.turn never moves until the final step).
+    ///      A call once the skill has already fired and is awaiting
+    ///      confirmBombardment reverts rather than being treated as a new
+    ///      opening call, since pendingAction stays Bombardment through
+    ///      that window too (areaSkill.stepsDone alone cannot tell the two
+    ///      apart, both read 0, hence the explicit check below).
+    ///
+    ///      Every call, opening or continuation, charges elapsed clock
+    ///      time exactly like a single-transaction action would: the
+    ///      acting player's clock keeps running for however long each step
+    ///      actually takes them to submit, and the opponent cannot act at
+    ///      all while a bombardment is mid-sequence, since the turn itself
+    ///      has not moved yet.
     function useBombardment(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
-        _beginAction(m);
-        _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_BOMBARDMENT);
-        require(
-            uint256(anchorRow) + BOMBARDMENT_AREA_SIZE <= BOARD_SIZE
-                && uint256(anchorCol) + BOMBARDMENT_AREA_SIZE <= BOARD_SIZE,
-            "bombardment area does not fit on the board"
-        );
-
-        PlayerSlot storage attacker = m.players[m.turn];
-        require(!attacker.bombardmentUsed, "bombardment already used");
-        attacker.bombardmentUsed = true;
-
         PlayerSlot storage defender = m.players[1 - m.turn];
-        uint8[] memory cells = CiphertideMechanics.pickAreaCells(
-            _publicStrikeSeed(m, matchId),
-            CiphertideMechanics.AreaGeometry({
-                anchorRow: anchorRow,
-                anchorCol: anchorCol,
-                width: BOMBARDMENT_AREA_SIZE,
-                height: BOMBARDMENT_AREA_SIZE
-            }),
-            BOMBARDMENT_STRIKE_COUNT,
-            BOMBARDMENT_STRIKE_COUNT,
-            defender.shotsAgainstMe
+
+        if (m.pendingAction == PendingAction.Bombardment) {
+            _continueSteppedArea(
+                m,
+                anchorRow,
+                anchorCol,
+                "skill already fired, awaiting confirmation",
+                "anchor must match the in-progress skill"
+            );
+        } else {
+            _beginSteppedAreaSkill(
+                m,
+                BOMBARDMENT_AREA_SIZE,
+                CAPTAIN_BOMBARDMENT,
+                "bombardment area does not fit on the board",
+                "bombardment already used",
+                anchorRow,
+                anchorCol,
+                PendingAction.Bombardment
+            );
+
+            uint8[] memory cells = CiphertideMechanics.pickAreaCells(
+                _publicStrikeSeed(m, matchId),
+                CiphertideMechanics.AreaGeometry({
+                    anchorRow: anchorRow,
+                    anchorCol: anchorCol,
+                    width: BOMBARDMENT_AREA_SIZE,
+                    height: BOMBARDMENT_AREA_SIZE
+                }),
+                BOMBARDMENT_STRIKE_COUNT,
+                BOMBARDMENT_STRIKE_COUNT,
+                defender.shotsAgainstMe
+            );
+            _storePendingAreaCells(m, cells);
+        }
+
+        (bool finished, uint8 done, ebool allDestroyed) = CiphertideMechanics.stepBombardment(
+            m.areaSkill, m.pendingAreaCells, BOMBARDMENT_STEP_SIZE, BOMBARDMENT_STRIKE_COUNT, defender
         );
 
-        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
-            CiphertideMechanics.resolveChosenAreaStrikes(cells, defender);
-        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
-        m.pendingAreaAnchorRow = anchorRow;
-        m.pendingAreaAnchorCol = anchorCol;
-        _storePendingAreaCells(m, cells);
+        if (!finished) {
+            emit BombardmentStepSubmitted(matchId, msg.sender, done, BOMBARDMENT_STRIKE_COUNT);
+            return;
+        }
 
-        m.pendingAction = PendingAction.Bombardment;
-
+        m.pendingActor = m.turn;
         emit BombardmentFired(
-            matchId, msg.sender, anchorRow, anchorCol, cells, euint256.unwrap(packed), ebool.unwrap(allDestroyed)
+            matchId,
+            msg.sender,
+            anchorRow,
+            anchorCol,
+            CiphertideMechanics.copyCells(m.pendingAreaCells, BOMBARDMENT_STRIKE_COUNT),
+            euint256.unwrap(m.areaSkill.packed),
+            ebool.unwrap(allDestroyed)
         );
     }
 
@@ -1164,13 +1274,86 @@ contract Ciphertide {
         (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) =
             CiphertideMechanics.resolveChosenAreaStrikes(cells, defender);
         _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
-        m.pendingAreaAnchorRow = row;
-        m.pendingAreaAnchorCol = 0;
+        m.areaSkill.anchorRow = row;
+        m.areaSkill.anchorCol = 0;
         _storePendingAreaCells(m, cells);
 
         m.pendingAction = PendingAction.Rake;
 
         emit RakeFired(matchId, msg.sender, row, cells, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
+    }
+
+    /// @dev Shared continuation preamble for a stepped area skill's second
+    ///      and later calls (Bombardment, Carpet), factored out of both
+    ///      useBombardment and useCarpet purely to keep this identical
+    ///      shape's bytecode from being duplicated in each: a call once the
+    ///      skill has already fired and is awaiting its confirm reverts
+    ///      (pendingAction stays set through that window too, so
+    ///      areaSkill.stepsDone, back at 0 by then, is what tells "just
+    ///      finished firing" apart from "never started"), a mismatched
+    ///      anchor reverts so a step sequence cannot be redirected
+    ///      partway through, and otherwise this charges elapsed clock time
+    ///      exactly like a fresh action's opening step would.
+    function _continueSteppedArea(
+        Match storage m,
+        uint8 anchorRow,
+        uint8 anchorCol,
+        string memory alreadyFiredMessage,
+        string memory anchorMismatchMessage
+    ) internal {
+        require(m.areaSkill.stepsDone > 0, alreadyFiredMessage);
+        require(
+            anchorRow == m.areaSkill.anchorRow && anchorCol == m.areaSkill.anchorCol, anchorMismatchMessage
+        );
+        _chargeElapsedTurnTime(m);
+    }
+
+    /// @dev Shared opening-step preamble for a stepped area skill's first
+    ///      call (Bombardment, Carpet), factored out purely to keep this
+    ///      identical shape's bytecode from being duplicated across both:
+    ///      requires no other action is pending, turn ownership and phase
+    ///      (via _beginAction), that the caller's captain owns this skill,
+    ///      that the chosen area fits the board, and that this skill has
+    ///      not already been used this match (the single-use gate a
+    ///      single-transaction skill sets inline; action alone says which
+    ///      of PlayerSlot's two stepped-skill used flags to check and set,
+    ///      a plain bool cannot be passed by storage reference), then seeds
+    ///      the shared pending-area bookkeeping every stepped skill needs:
+    ///      the anchor, a fresh zeroed packed and struck accumulator, and
+    ///      which skill is now in flight. The caller still does its own
+    ///      skill-specific opening work afterward (Bombardment picks and
+    ///      stores its cell list, Carpet computes and stores its
+    ///      ship-present gate).
+    function _beginSteppedAreaSkill(
+        Match storage m,
+        uint8 areaSize,
+        uint8 requiredCaptainId,
+        string memory areaFitMessage,
+        string memory alreadyUsedMessage,
+        uint8 anchorRow,
+        uint8 anchorCol,
+        PendingAction action
+    ) internal {
+        _beginAction(m);
+        _requireCaptainOwnsSkill(m, m.turn, requiredCaptainId);
+        require(
+            uint256(anchorRow) + areaSize <= BOARD_SIZE && uint256(anchorCol) + areaSize <= BOARD_SIZE, areaFitMessage
+        );
+
+        PlayerSlot storage attacker = m.players[m.turn];
+        bool alreadyUsed = action == PendingAction.Bombardment ? attacker.bombardmentUsed : attacker.carpetUsed;
+        require(!alreadyUsed, alreadyUsedMessage);
+        if (action == PendingAction.Bombardment) {
+            attacker.bombardmentUsed = true;
+        } else {
+            attacker.carpetUsed = true;
+        }
+
+        m.areaSkill.anchorRow = anchorRow;
+        m.areaSkill.anchorCol = anchorCol;
+        m.areaSkill.packed = e.asEuint256(uint256(0));
+        m.areaSkill.struckSoFar = e.asEuint256(uint256(0));
+        m.pendingAction = action;
     }
 
     /// @dev Shared reveal-and-stash tail for every multi-cell strike skill
@@ -1197,8 +1380,8 @@ contract Ciphertide {
         defender.lastDestroyedMask = newlyDestroyed;
 
         m.pendingActor = m.turn;
-        m.pendingAreaPacked = packed;
-        m.pendingAreaAllDestroyed = allDestroyed;
+        m.areaSkill.packed = packed;
+        m.areaSkill.allDestroyed = allDestroyed;
     }
 
     /// @dev Decodes an area strike's packed slots (shared by Barrage,
@@ -1308,7 +1491,7 @@ contract Ciphertide {
         require(m.pendingAction == expectedAction, noPendingMessage);
         uint256 packedValue = uint256(
             _verifyAttestation(
-                euint256.unwrap(m.pendingAreaPacked),
+                euint256.unwrap(m.areaSkill.packed),
                 packedAttestation,
                 packedSignatures,
                 invalidPackedMessage,
@@ -1317,7 +1500,7 @@ contract Ciphertide {
         );
         bool won = asBool(
             _verifyAttestation(
-                ebool.unwrap(m.pendingAreaAllDestroyed),
+                ebool.unwrap(m.areaSkill.allDestroyed),
                 allDestroyedAttestation,
                 allDestroyedSignatures,
                 "invalid win attestation",
@@ -1507,7 +1690,7 @@ contract Ciphertide {
         require(m.pendingAction == PendingAction.Salvo, "no pending salvo");
         uint256 packedValue = uint256(
             _verifyAttestation(
-                euint256.unwrap(m.pendingAreaPacked),
+                euint256.unwrap(m.areaSkill.packed),
                 packedAttestation,
                 packedSignatures,
                 "invalid salvo attestation",
@@ -1516,7 +1699,7 @@ contract Ciphertide {
         );
         bool won = asBool(
             _verifyAttestation(
-                ebool.unwrap(m.pendingAreaAllDestroyed),
+                ebool.unwrap(m.areaSkill.allDestroyed),
                 allDestroyedAttestation,
                 allDestroyedSignatures,
                 "invalid win attestation",
@@ -1548,36 +1731,69 @@ contract Ciphertide {
     /// @dev The 3x3 is a public choice and its trigger check is a single
     ///      free comparison, no random draws, so like Sonar and Salvo this
     ///      needs no fee.
+    ///
+    ///      Resolving all 9 cells in one transaction can exceed Base's
+    ///      protocol level per-transaction gas cap (see CARPET_STEP_SIZE's
+    ///      own comment), so this call is stepped exactly like
+    ///      useBombardment: call it repeatedly with the SAME matchId,
+    ///      anchorRow and anchorCol until it stops emitting
+    ///      CarpetStepSubmitted and emits CarpetFired instead.
+    ///
+    ///      The opening call (pendingAction is not already Carpet for this
+    ///      match) validates turn, captain, area and single use, and
+    ///      computes the "any ship cell inside the 3x3" gate once (see
+    ///      CiphertideMechanics.beginCarpetShipPresent), storing it so
+    ///      every later chunk gates its slots identically. Every call
+    ///      after that must reuse the exact same anchor, checked against
+    ///      the stored one, and a call once the skill has already fired
+    ///      and is awaiting confirmCarpet reverts rather than being
+    ///      treated as a new opening call, the same distinction
+    ///      useBombardment's own comment explains. Every call, opening or
+    ///      continuation, charges elapsed clock time exactly like a
+    ///      single-transaction action would, and the opponent cannot act
+    ///      at all while a carpet is mid-sequence, since m.turn has not
+    ///      moved yet.
     function useCarpet(uint256 matchId, uint8 anchorRow, uint8 anchorCol) external onlyPlayer(matchId) {
         Match storage m = matches[matchId];
-        _beginAction(m);
-        _requireCaptainOwnsSkill(m, m.turn, CAPTAIN_CARPET);
-        require(
-            uint256(anchorRow) + CARPET_AREA_SIZE <= BOARD_SIZE && uint256(anchorCol) + CARPET_AREA_SIZE <= BOARD_SIZE,
-            "carpet area does not fit on the board"
-        );
-
-        PlayerSlot storage attacker = m.players[m.turn];
-        require(!attacker.carpetUsed, "carpet already used");
-        attacker.carpetUsed = true;
-
         PlayerSlot storage defender = m.players[1 - m.turn];
-        (euint256 packed, euint256 newlyDestroyed, ebool allDestroyed) = CiphertideMechanics.resolveCarpetStrike(
-            CiphertideMechanics.AreaGeometry({
-                anchorRow: anchorRow,
-                anchorCol: anchorCol,
-                width: CARPET_AREA_SIZE,
-                height: CARPET_AREA_SIZE
-            }),
-            defender
-        );
-        _finalizeAreaPending(m, defender, packed, newlyDestroyed, allDestroyed);
-        m.pendingAreaAnchorRow = anchorRow;
-        m.pendingAreaAnchorCol = anchorCol;
+        CiphertideMechanics.AreaGeometry memory area = CiphertideMechanics.AreaGeometry({
+            anchorRow: anchorRow,
+            anchorCol: anchorCol,
+            width: CARPET_AREA_SIZE,
+            height: CARPET_AREA_SIZE
+        });
 
-        m.pendingAction = PendingAction.Carpet;
+        if (m.pendingAction == PendingAction.Carpet) {
+            _continueSteppedArea(
+                m, anchorRow, anchorCol, "skill already fired, awaiting confirmation", "anchor must match the in-progress skill"
+            );
+        } else {
+            _beginSteppedAreaSkill(
+                m,
+                CARPET_AREA_SIZE,
+                CAPTAIN_CARPET,
+                "carpet area does not fit on the board",
+                "carpet already used",
+                anchorRow,
+                anchorCol,
+                PendingAction.Carpet
+            );
 
-        emit CarpetFired(matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(packed), ebool.unwrap(allDestroyed));
+            ebool shipPresent = CiphertideMechanics.beginCarpetShipPresent(area, defender);
+            shipPresent.allowThis();
+            m.areaSkill.carpetShipPresent = shipPresent;
+        }
+
+        (bool finished, uint8 done, ebool allDestroyed) =
+            CiphertideMechanics.stepCarpet(m.areaSkill, area, CARPET_STEP_SIZE, CARPET_CELL_COUNT, defender);
+
+        if (!finished) {
+            emit CarpetStepSubmitted(matchId, msg.sender, done, CARPET_CELL_COUNT);
+            return;
+        }
+
+        m.pendingActor = m.turn;
+        emit CarpetFired(matchId, msg.sender, anchorRow, anchorCol, euint256.unwrap(m.areaSkill.packed), ebool.unwrap(allDestroyed));
     }
 
     /// @dev Decodes carpet's packed slots (3 bits per cell, 9 fixed cells
@@ -1631,7 +1847,7 @@ contract Ciphertide {
         require(m.pendingAction == PendingAction.Carpet, "no pending carpet");
         uint256 packedValue = uint256(
             _verifyAttestation(
-                euint256.unwrap(m.pendingAreaPacked),
+                euint256.unwrap(m.areaSkill.packed),
                 packedAttestation,
                 packedSignatures,
                 "invalid carpet attestation",
@@ -1640,7 +1856,7 @@ contract Ciphertide {
         );
         bool won = asBool(
             _verifyAttestation(
-                ebool.unwrap(m.pendingAreaAllDestroyed),
+                ebool.unwrap(m.areaSkill.allDestroyed),
                 allDestroyedAttestation,
                 allDestroyedSignatures,
                 "invalid win attestation",
@@ -1651,7 +1867,7 @@ contract Ciphertide {
         uint8 actorIdx = m.pendingActor;
         PlayerSlot storage defender = m.players[1 - actorIdx];
         bool anyMineTriggered =
-            _applyCarpetResults(matchId, defender, packedValue, m.pendingAreaAnchorRow, m.pendingAreaAnchorCol);
+            _applyCarpetResults(matchId, defender, packedValue, m.areaSkill.anchorRow, m.areaSkill.anchorCol);
 
         _finishAreaAction(matchId, m, actorIdx, won, anyMineTriggered);
     }
