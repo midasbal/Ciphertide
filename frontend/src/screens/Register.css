@@ -1,0 +1,470 @@
+.register {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------------
+ * Main and the console frame
+ * --------------------------------------------------------------- */
+
+.register-main {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  max-width: 46rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6) var(--ct-space-8);
+}
+
+.register-console-frame {
+  position: relative;
+  background: var(--ct-bg-panel);
+  border: 1px solid var(--ct-border);
+  border-radius: var(--ct-radius-lg);
+  box-shadow: var(--ct-shadow-panel);
+  overflow: hidden;
+}
+
+.register-corner {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--ct-border-strong);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.register-corner--tl {
+  top: -1px;
+  left: -1px;
+  border-right: none;
+  border-bottom: none;
+}
+
+.register-corner--tr {
+  top: -1px;
+  right: -1px;
+  border-left: none;
+  border-bottom: none;
+}
+
+.register-corner--bl {
+  bottom: -1px;
+  left: -1px;
+  border-right: none;
+  border-top: none;
+}
+
+.register-corner--br {
+  bottom: -1px;
+  right: -1px;
+  border-left: none;
+  border-top: none;
+}
+
+/* Reveal failsafe: if the intersection observer never fires, force every
+ * reveal on this page visible after a beat so the page can never be left
+ * blank. Harmless when JS already revealed it earlier. */
+.register .reveal {
+  animation: register-reveal-failsafe 0ms 900ms forwards;
+}
+
+@keyframes register-reveal-failsafe {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .register .reveal {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Header band
+ * --------------------------------------------------------------- */
+
+.register-header {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--ct-border-faint);
+}
+
+.register-header-backdrop {
+  position: absolute;
+  inset: 0;
+  opacity: 0.28;
+  pointer-events: none;
+}
+
+.register-header-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-3);
+  padding: var(--ct-space-6);
+}
+
+.register-title {
+  font-size: clamp(1.75rem, 3.4vw, var(--ct-text-2xl));
+  line-height: var(--ct-leading-tight);
+}
+
+.register-sub {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-base);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------
+ * Body panel
+ * --------------------------------------------------------------- */
+
+.register-body {
+  padding: var(--ct-space-6);
+}
+
+.register-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ct-space-3);
+  width: 100%;
+}
+
+.register-panel-title {
+  font-size: var(--ct-text-lg);
+}
+
+.register-panel-copy {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-sm);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  margin: 0;
+  max-width: 34rem;
+}
+
+.register-divider {
+  width: 100%;
+  height: 1px;
+  background: var(--ct-border-faint);
+  margin: var(--ct-space-2) 0;
+}
+
+.register-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-space-3);
+}
+
+/* ---------------------------------------------------------------
+ * Buttons
+ * --------------------------------------------------------------- */
+
+.register-btn {
+  appearance: none;
+  border-radius: var(--ct-radius-md);
+  font-family: var(--ct-font-mono);
+  font-size: var(--ct-text-sm);
+  letter-spacing: var(--ct-tracking-wide);
+  text-transform: uppercase;
+  padding: var(--ct-space-3) var(--ct-space-5);
+  cursor: pointer;
+  transition:
+    background var(--ct-duration-standard) var(--ct-ease-standard),
+    border-color var(--ct-duration-standard) var(--ct-ease-standard),
+    color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.register-btn:focus-visible {
+  outline: 2px solid var(--ct-border-live);
+  outline-offset: 2px;
+}
+
+.register-btn--primary {
+  border: 1px solid var(--ct-border-live);
+  background: var(--ct-accent);
+  color: var(--ct-text-on-accent);
+}
+
+.register-btn--primary:hover {
+  background: var(--ct-accent-bright);
+}
+
+.register-btn--ghost {
+  border: 1px solid var(--ct-border-faint);
+  background: transparent;
+  color: var(--ct-text-secondary);
+  padding: var(--ct-space-2) var(--ct-space-4);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ct-space-2);
+}
+
+.register-btn--ghost:hover {
+  border-color: var(--ct-border);
+  color: var(--ct-text-primary);
+}
+
+.register-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.register-btn:disabled:hover {
+  border-color: var(--ct-border-faint);
+  color: var(--ct-text-secondary);
+}
+
+.register-soon {
+  color: var(--ct-text-ghost);
+}
+
+/* ---------------------------------------------------------------
+ * Pending states
+ * --------------------------------------------------------------- */
+
+.register-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-space-3);
+  color: var(--ct-text-secondary);
+  font-size: var(--ct-text-sm);
+}
+
+.register-pulse {
+  position: relative;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex-shrink: 0;
+}
+
+.register-pulse svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.register-pulse circle,
+.register-pulse line {
+  fill: none;
+  stroke: var(--ct-color-structure-soft);
+  stroke-width: 1;
+}
+
+.register-pulse circle:first-child {
+  stroke: var(--ct-border-live);
+}
+
+.register-pulse-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: var(--ct-accent-bright);
+  box-shadow: 0 0 10px 2px var(--ct-accent-soft);
+  animation: register-pulse-beat var(--ct-duration-sonar-sweep) var(--ct-ease-sonar) infinite;
+}
+
+@keyframes register-pulse-beat {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .register-pulse-dot {
+    animation: none;
+    opacity: 0.85;
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Address and transaction readouts
+ * --------------------------------------------------------------- */
+
+.register-address-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-1);
+  width: 100%;
+}
+
+.register-address {
+  font-size: var(--ct-text-base);
+  color: var(--ct-accent-bright);
+  text-shadow: 0 0 12px var(--ct-accent-soft);
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-md);
+  padding: var(--ct-space-2) var(--ct-space-4);
+  word-break: break-all;
+  user-select: all;
+}
+
+.register-tx {
+  font-size: var(--ct-text-xs);
+  color: var(--ct-text-tertiary);
+  word-break: break-all;
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------
+ * Key backup panel
+ * --------------------------------------------------------------- */
+
+.register-backup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-3);
+  width: 100%;
+  padding: var(--ct-space-4);
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-md);
+}
+
+.register-backup-warning {
+  font-family: var(--ct-font-body);
+  font-size: var(--ct-text-xs);
+  line-height: var(--ct-leading-normal);
+  color: var(--ct-text-secondary);
+  margin: 0;
+}
+
+.register-key-row {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.register-key {
+  display: block;
+  font-size: var(--ct-text-sm);
+  color: var(--ct-text-primary);
+  word-break: break-all;
+  user-select: all;
+}
+
+.register-backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-space-2);
+}
+
+/* ---------------------------------------------------------------
+ * Import a backed up key
+ * --------------------------------------------------------------- */
+
+.register-import {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-3);
+  width: 100%;
+  max-width: 28rem;
+}
+
+.register-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-space-2);
+  width: 100%;
+}
+
+.register-input {
+  background: var(--ct-bg-well);
+  border: 1px solid var(--ct-border-faint);
+  border-radius: var(--ct-radius-md);
+  color: var(--ct-text-primary);
+  font-size: var(--ct-text-sm);
+  padding: var(--ct-space-3) var(--ct-space-4);
+  outline: none;
+  transition: border-color var(--ct-duration-standard) var(--ct-ease-standard);
+}
+
+.register-input::placeholder {
+  color: var(--ct-text-ghost);
+}
+
+.register-input:focus {
+  border-color: var(--ct-border-live);
+}
+
+/* ---------------------------------------------------------------
+ * Errors, the one place ember shows up on this page
+ * --------------------------------------------------------------- */
+
+.register-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ct-space-3);
+  width: 100%;
+  padding: var(--ct-space-3) var(--ct-space-4);
+  background: var(--ct-hit-faint);
+  border: 1px solid var(--ct-hit-soft);
+  border-radius: var(--ct-radius-md);
+}
+
+.register-error p {
+  margin: 0;
+  font-size: var(--ct-text-sm);
+  color: var(--ct-hit-bright);
+}
+
+/* ---------------------------------------------------------------
+ * Responsive
+ * --------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .register-main {
+    padding: var(--ct-space-4) var(--ct-space-4) var(--ct-space-7);
+  }
+
+  .register-header-content {
+    padding: var(--ct-space-5) var(--ct-space-4);
+  }
+
+  .register-body {
+    padding: var(--ct-space-5) var(--ct-space-4);
+  }
+}
+
+/* ---------------------------------------------------------------
+ * Footer
+ * --------------------------------------------------------------- */
+
+.register-footer {
+  position: relative;
+  z-index: 1;
+  max-width: 46rem;
+  margin: 0 auto;
+  width: 100%;
+  padding: var(--ct-space-5) var(--ct-space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--ct-space-2);
+  border-top: 1px solid var(--ct-border-faint);
+  font-size: var(--ct-text-2xs);
+  color: var(--ct-text-ghost);
+  letter-spacing: var(--ct-tracking-wide);
+}

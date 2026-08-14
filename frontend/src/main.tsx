@@ -30,6 +30,10 @@ const Profile = lazy(() => import('./screens/Profile.tsx'))
 // contract.
 const Lobby = lazy(() => import('./screens/Lobby.tsx'))
 
+// Play-wallet on-ramp: generates and funds a fresh wallet, or recognizes
+// one already saved in this browser.
+const Register = lazy(() => import('./screens/Register.tsx'))
+
 // Shared layout for the main, user-facing routes: the persistent top
 // nav plus whichever page is active. The match and dev routes render
 // their own header instead and sit outside this layout.
@@ -50,6 +54,7 @@ function Root() {
           <Route element={<MainLayout />}>
             <Route path="/" element={<Landing />} />
             <Route path="/play" element={<Lobby />} />
+            <Route path="/register" element={<Register />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/leaderboard" element={<Leaderboard />} />
           </Route>
