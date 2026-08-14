@@ -39,6 +39,14 @@ const DEMO_SEQUENCE: Array<{ state: CipherCellState; holdMs: number }> = [
   { state: 'miss', holdMs: 2600 },
 ]
 
+// Derived once at module load, not per render: the board re-renders every
+// 130ms off the shared scramble tick, and none of this depends on that
+// tick, only on the static fixtures above.
+const MISS_SET = new Set(STATIC_MISSES.map(([r, c]) => key(r, c)))
+const HIT_SET = new Set(STATIC_HITS.map(([r, c]) => key(r, c)))
+const MINE_KEY = key(...STATIC_MINE)
+const DEMO_KEY = key(...DEMO_CELL)
+
 interface EnemyBoardProps {
   onSelectCell?: (row: number, col: number) => void
   interactive?: boolean
@@ -66,18 +74,14 @@ export default function EnemyBoard({ onSelectCell, interactive }: EnemyBoardProp
     return () => window.clearTimeout(timeoutRef.current)
   }, [demoIndex])
 
-  const missSet = new Set(STATIC_MISSES.map(([r, c]) => key(r, c)))
-  const hitSet = new Set(STATIC_HITS.map(([r, c]) => key(r, c)))
-  const mineKey = key(...STATIC_MINE)
-  const demoKey = key(...DEMO_CELL)
   const demoState = DEMO_SEQUENCE[demoIndex].state
 
   function stateFor(row: number, col: number): CipherCellState {
     const k = key(row, col)
-    if (k === demoKey) return demoState
-    if (k === mineKey) return 'mine'
-    if (hitSet.has(k)) return 'hit'
-    if (missSet.has(k)) return 'miss'
+    if (k === DEMO_KEY) return demoState
+    if (k === MINE_KEY) return 'mine'
+    if (HIT_SET.has(k)) return 'hit'
+    if (MISS_SET.has(k)) return 'miss'
     return 'hidden'
   }
 
@@ -91,7 +95,7 @@ export default function EnemyBoard({ onSelectCell, interactive }: EnemyBoardProp
           const k = key(row, col)
           return (
             <CipherCell
-              key={k === demoKey ? `${k}:${demoState}` : k}
+              key={k === DEMO_KEY ? `${k}:${demoState}` : k}
               row={row}
               col={col}
               state={state}
