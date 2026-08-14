@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Headless end-to-end run of a full Ciphertide match against a live deployment on Base Sepolia, exercising the real Inco Lightning encrypt, call, fetch-attestation, confirm loop. No UI, no frontend dependency.",
   "scripts": {
-    "e2e": "tsx run.ts"
+    "e2e": "node --env-file=.env node_modules/tsx/dist/cli.mjs run.ts"
   },
   "dependencies": {
     "@inco/lightning-js": "^1.0.2",

@@ -86,6 +86,8 @@ if (missingEnv.length > 0) {
   process.exit(1);
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function findEvent(receipt: TransactionReceipt, eventName: string) {
   for (const log of receipt.logs) {
     try {
@@ -135,17 +137,80 @@ async function main() {
     return BigInt(value as number | bigint);
   };
 
+  // sepolia.base.org is a load balanced public endpoint with several
+  // backend nodes behind it, no session affinity across separate HTTP
+  // requests. writeContract's own gas estimation step can land on a node
+  // that has not yet caught up with the previous write (a join, a
+  // confirm, and so on), and reverts against that stale view even though
+  // the real current chain state is fine, the same class of staleness as
+  // the sleep after a write below guards against on the read side. This
+  // never actually broadcasts a transaction when estimation itself fails,
+  // so retrying costs no gas, only a little wall clock time.
+  async function writeContractWithRetry(wallet: typeof walletA, callArgs: any): Promise<Hex> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await wallet.writeContract(callArgs);
+      } catch (err) {
+        lastError = err;
+        console.log(`  (retrying ${String(callArgs.functionName)} after a likely stale-node estimation failure)`);
+        await sleep(2000 * (attempt + 1));
+      }
+    }
+    throw lastError;
+  }
+
+  // sepolia.base.org's eth_estimateGas caps its own search well under the
+  // real block gas limit (1.2 billion on Base Sepolia), a common public
+  // RPC safety cap unrelated to what the chain itself allows. Every call
+  // that runs many real Inco random draws in a loop (each one a real
+  // operation against the live executor, not the cheap mock) needs real
+  // gas in the tens of millions, at or past that estimation cap, so
+  // estimateGas itself fails with a bare "execution reverted" before the
+  // transaction is ever sent, even though a direct eth_call with an
+  // explicit high gas value confirms the call actually succeeds (measured
+  // locally: placeMyBoard's real 140 draws need roughly 51 to 55 million
+  // gas, right against a plain geth-style default RPCGasCap of 50 million).
+  // Passing an explicit gas limit skips estimation entirely.
+  //
+  // On a free public RPC this only gets you to the next wall: every
+  // public endpoint tried here (sepolia.base.org, publicnode, drpc) also
+  // rejects eth_sendRawTransaction itself once the declared gas limit
+  // passes some lower policy ceiling of its own, seen anywhere from about
+  // 20 million to 50 million depending on which backend node answers,
+  // still short of the ~51 to 55 million placeMyBoard actually needs. That
+  // is a real, separate ceiling from estimateGas's, and it is the genuine
+  // blocker recorded in this session's report, not something this script
+  // can work around: it needs a private or paid RPC (Alchemy, Infura, and
+  // so on) configured with a higher per-transaction gas allowance in
+  // BASE_SEPOLIA_RPC_URL. The values below are generous headroom for that
+  // case, real gas used is what gets billed, not the limit.
+  const explicitGasLimits: Record<string, bigint> = {
+    placeMyBoard: 120_000_000n,
+    useBombardment: 80_000_000n,
+    useBarrage: 60_000_000n,
+    useRake: 60_000_000n,
+  };
+
   async function write(wallet: typeof walletA, functionName: string, args: unknown[], value = 0n) {
-    const hash = await wallet.writeContract({
+    const gas = explicitGasLimits[functionName];
+    const hash = await writeContractWithRetry(wallet, {
       address: ciphertideAddress,
       abi: ciphertideAbi,
       functionName,
       args,
       value,
       chain: baseSepolia,
+      ...(gas ? { gas } : {}),
     });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     gasLog.push({ label: functionName, gasUsed: receipt.gasUsed });
+    // sepolia.base.org is a load balanced public endpoint: a read right
+    // after a mined write can land on a different backend node that has
+    // not caught up yet. A short pause here is cheap next to the several
+    // seconds a Base Sepolia confirmation already takes, and avoids a
+    // false failure on a state check that is actually correct on chain.
+    await sleep(1500);
     return receipt;
   }
 

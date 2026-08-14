@@ -1,0 +1,11 @@
+{
+  "chainId": 84532,
+  "chainName": "Base Sepolia",
+  "deployer": "0x688e96606e026734b59586347f811786BC496A4c",
+  "deployedAt": "2026-08-14T03:07:11Z",
+  "gitCommit": "2755d962b694141b3c5166b5ea9ddbb145aa5375",
+  "contracts": {
+    "CiphertideMechanics": "0xa7bf7e9687180144Af04FfF6A6fa6B9B020f32DC",
+    "Ciphertide": "0xA3246B9d8de010D2BB8c1dD322Db489679859dE6"
+  }
+}
