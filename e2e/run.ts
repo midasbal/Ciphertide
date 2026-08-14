@@ -222,22 +222,66 @@ async function main() {
   // to what the chain itself allows. A call that runs many real Inco
   // random draws in one transaction (each one a real operation against the
   // live executor, not the cheap mock) can need real gas at or past that
-  // estimation cap, so estimateGas itself fails with a bare "execution
-  // reverted" before the transaction is ever sent, even though a direct
-  // eth_call with an explicit high gas value confirms the call actually
-  // succeeds. Passing an explicit gas limit skips estimation entirely.
-  // Placement no longer needs this (placeMyBoardStep keeps every call to
-  // roughly 10 million real gas or less). Barrage's real cost measured
-  // live at about 11.85 million gas (cast estimate against the live
-  // deployment), well inside both the real block gas limit and Alchemy's
-  // own lower per-transaction cap (previously found to sit around 15-20
-  // million, see the note on writeContractWithRetry above), so it no
-  // longer needs an override either; an earlier, overly conservative 60
-  // million override (a holdover from when placement was one single call)
-  // actually broke Barrage here, since Alchemy rejects a transaction
-  // whose requested gas exceeds its own cap outright, regardless of how
-  // much gas the call would really use.
-  const explicitGasLimits: Record<string, bigint> = {};
+  // estimation cap, so estimateGas itself fails silently low rather than
+  // reverting: a live Barrage call once got estimated at only about 1.91
+  // million gas and then reverted out of gas, when its real cost, measured
+  // from a transaction that actually succeeded, is about 11.85 million.
+  // Passing an explicit gas limit skips estimation entirely.
+  //
+  // The note this replaces claimed Barrage no longer needed an override
+  // because its real cost sat comfortably under the hosted RPC's own
+  // per-transaction cap (found to sit around 15-20 million on Alchemy, see
+  // writeContractWithRetry above); that claim was correct about the cap
+  // but wrong about estimation being safe to rely on regardless, and the
+  // resulting override-free code is exactly what produced the out-of-gas
+  // Barrage revert above. Restoring an explicit limit here, sized between
+  // the real measured cost and that RPC cap, not blindly reusing the old
+  // 60/80 million values (an earlier, overly conservative override from
+  // when placement was one single call): those exceeded Alchemy's cap
+  // outright and got the transaction rejected before it could even be
+  // sent, a worse failure than an out-of-gas revert.
+  //
+  // Placement itself still needs no override (placeMyBoardStep keeps
+  // every call to roughly 10 million real gas or less).
+  //
+  // Barrage: real cost measured live at about 11.85 million gas (see
+  // above), 13 million here leaves a margin while staying well under the
+  // RPC cap.
+  //
+  // Rake and Salvo strike only 3 cells each through the same per-cell
+  // confidential resolution path Barrage uses for its 4 to 6, so their
+  // real cost should scale down from Barrage's roughly proportionally
+  // (about 3/5 of it, so roughly 7 million); 9 million here leaves the
+  // same kind of margin. Derived, not measured: no prior override existed
+  // for either, and sending a real transaction to measure them directly
+  // was avoided to save the limited funded wallets' gas.
+  //
+  // Bombardment and Carpet are deliberately left WITHOUT an override.
+  // Bombardment strikes a fixed 15 cells (the heaviest single call in the
+  // game), and Carpet always evaluates all 9 of its cells even on a
+  // silent whiff, since which cells to check cannot depend on whether any
+  // of them will actually hit without leaking that fact. Scaling Barrage's
+  // real 11.85 million by cell count alone puts Bombardment at roughly 35
+  // million and Carpet at roughly 21 million, both past the RPC's own
+  // per-transaction cap: a large explicit limit here would just repeat
+  // the old 60/80 million mistake, an outright rejected send instead of
+  // an out-of-gas revert. Both need the same stepped-call treatment
+  // placement already got (splitting one call into several smaller ones
+  // the RPC will actually broadcast), a separate, larger contract-side fix
+  // this pass does not attempt.
+  //
+  // Sonar and placeShield need no override: Sonar does one confidential
+  // comparison over a single area mask, and placeShield does one
+  // ciphertext ingestion plus a handful of fixed operations, neither one
+  // a per-cell loop over an area, and a live cast estimate for Sonar
+  // against this deployment's actual state came back at a plausible
+  // (uncapped-looking) 198 thousand gas, consistent with it not tripping
+  // the same estimator problem.
+  const explicitGasLimits: Record<string, bigint> = {
+    useBarrage: 13_000_000n,
+    useRake: 9_000_000n,
+    useSalvo: 9_000_000n,
+  };
 
   async function write(wallet: typeof walletA, functionName: string, args: unknown[], value = 0n) {
     const gas = explicitGasLimits[functionName];

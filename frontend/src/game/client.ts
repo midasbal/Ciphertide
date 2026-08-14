@@ -58,6 +58,38 @@ export const ciphertideAbi = ciphertideAbiJson as Abi
 const ZERO32 = ('0x' + '0'.repeat(64)) as Hex
 const nonZero = (h: Hex) => h !== ZERO32
 
+// eth_estimateGas badly underestimates the heavy skill calls: a live
+// Barrage call once got estimated at only about 1.91 million gas and then
+// reverted out of gas, when its real cost, measured from a transaction
+// that actually succeeded, is about 11.85 million. Passing an explicit
+// gas limit skips estimation entirely for these. Ported from e2e/run.ts,
+// see that file's own longer comment on this same map for the full
+// reasoning and the RPC per-transaction cap (around 15-20 million on
+// Alchemy) these values were sized under.
+//
+// Barrage: real cost about 11.85 million, 13 million leaves a margin.
+// Rake and Salvo strike only 3 cells each through the same per-cell path
+// Barrage uses for 4 to 6, so their real cost should scale down roughly
+// proportionally (about 7 million); 9 million leaves the same margin.
+// Derived, not measured, the same as in e2e/run.ts.
+//
+// Bombardment (a fixed 15 cells) and Carpet (always evaluates all 9 of
+// its cells, even on a silent whiff) are deliberately left WITHOUT an
+// override: scaling Barrage's real cost by cell count puts both past the
+// RPC's own per-transaction cap, where a large explicit limit would just
+// get the transaction rejected before it could even be sent, a worse
+// failure than an out-of-gas revert. Both need the contract-side stepped-
+// call treatment placement already got, a separate, larger fix.
+//
+// Sonar and placeShield need no override: neither is a per-cell loop
+// over an area, and a live cast estimate for Sonar against the deployed
+// contract came back at a plausible 198 thousand gas.
+const EXPLICIT_GAS_LIMITS: Record<string, bigint> = {
+  useBarrage: 13_000_000n,
+  useRake: 9_000_000n,
+  useSalvo: 9_000_000n,
+}
+
 // Pinned to the concrete baseSepolia chain object (not the bare viem
 // Chain type) since this project targets Base Sepolia only, and because
 // viem's generic Chain type is missing the OP-stack specific formatter
@@ -140,6 +172,7 @@ export class CiphertideClient {
   }
 
   private async write(functionName: string, args: unknown[], value = 0n): Promise<TransactionReceipt> {
+    const gas = EXPLICIT_GAS_LIMITS[functionName]
     const hash = await this.writeContractWithRetry({
       address: this.address,
       abi: ciphertideAbi,
@@ -148,6 +181,7 @@ export class CiphertideClient {
       value,
       account: this.walletClient.account,
       chain: this.walletClient.chain,
+      ...(gas ? { gas } : {}),
     } as never)
     const receipt = await this.publicClient.waitForTransactionReceipt({ hash })
     // A read right after a mined write can land on a different, load
