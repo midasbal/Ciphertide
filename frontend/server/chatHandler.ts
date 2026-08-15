@@ -12,9 +12,9 @@
 // once did.
 import { createPublicClient, http, isAddress, recoverMessageAddress, type Address, type Hex } from 'viem'
 import { baseSepolia } from 'viem/chains'
-import { buildChatSignedMessage } from '../src/lib/chatMessage.ts'
-import { DEFAULT_CIPHERTIDE_ADDRESS } from '../src/lib/contractAddress.ts'
-import { appendMessage, isRateLimited, messagesSince } from './chatStore.ts'
+import { buildChatSignedMessage } from '../src/lib/chatMessage'
+import { DEFAULT_CIPHERTIDE_ADDRESS } from '../src/lib/contractAddress'
+import { appendMessage, isRateLimited, messagesSince } from './chatStore'
 
 const MAX_MESSAGE_LENGTH = 280
 const RATE_LIMIT_WINDOW_MS = 10_000

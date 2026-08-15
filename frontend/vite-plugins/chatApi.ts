@@ -1,5 +1,5 @@
 import { loadEnv, type Plugin, type ViteDevServer } from 'vite'
-import { handleChatSend, handleChatPoll } from '../server/chatHandler.ts'
+import { handleChatSend, handleChatPoll } from '../server/chatHandler'
 
 async function readBody(req: import('http').IncomingMessage): Promise<string> {
   const chunks: Buffer[] = []

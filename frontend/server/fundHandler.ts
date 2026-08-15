@@ -23,7 +23,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
-import { buildFundingMessage } from '../src/lib/fundingMessage.ts'
+import { buildFundingMessage } from '../src/lib/fundingMessage'
 
 const FUND_AMOUNT_ETH = '0.005'
 // If an address already holds more than this, it counts as already
@@ -134,7 +134,18 @@ export async function handleFundRequest(request: Request): Promise<Response> {
   const walletClient = createWalletClient({ account: sponsorAccount, chain: baseSepolia, transport: http(url) })
 
   try {
-    const hash = await walletClient.sendTransaction({ to: address, value: parseEther(FUND_AMOUNT_ETH) })
+    // account and chain are passed through explicitly even though
+    // walletClient already carries both, since viem's sendTransaction
+    // has separate overloads for a plain transfer versus an EIP-4844
+    // blob transaction, and without an explicit account and chain at
+    // the call site TypeScript can resolve to the blob overload, which
+    // requires a kzg field this call has no use for.
+    const hash = await walletClient.sendTransaction({
+      account: sponsorAccount,
+      chain: baseSepolia,
+      to: address,
+      value: parseEther(FUND_AMOUNT_ETH),
+    })
     await publicClient.waitForTransactionReceipt({ hash })
     return jsonResponse(200, { txHash: hash })
   } catch {

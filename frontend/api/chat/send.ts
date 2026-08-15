@@ -2,8 +2,8 @@
 // message. Adapts Vercel's req/res shape to the portable Fetch handler
 // in server/chatHandler.ts, the same handler the Vite dev server calls
 // directly in local dev (see vite-plugins/chatApi.ts).
-import { handleChatSend } from '../../server/chatHandler.ts'
-import { toFetchRequest, sendFetchResponse, type NodeStyleRequest, type NodeStyleResponse } from '../../server/vercelAdapter.ts'
+import { handleChatSend } from '../../server/chatHandler'
+import { toFetchRequest, sendFetchResponse, type NodeStyleRequest, type NodeStyleResponse } from '../../server/vercelAdapter'
 
 export default async function handler(req: NodeStyleRequest, res: NodeStyleResponse): Promise<void> {
   const response = await handleChatSend(toFetchRequest(req))
