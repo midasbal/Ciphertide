@@ -5,18 +5,16 @@
 // chosen later (see api/chat/send.ts and api/chat/poll.ts) with only a
 // thin adapter, the same pattern server/fundHandler.ts already uses.
 //
-// STATE CAVEAT: every message and the per-sender rate limiter both live
-// in a plain module-level Map, which only works because this runs inside
-// one long-lived Node process, the Vite dev server today. A serverless
-// deployment has no such process between requests, each invocation can
-// land on a fresh instance with an empty Map, so a production deploy of
-// this feature needs a real stateful host behind these two functions (a
-// KV store, Redis, a small database, and so on), the identical caveat
-// server/fundHandler.ts's own in-memory rate limiter carries for a
-// serverless deploy, see that file's own comment.
+// Message storage and the per-sender rate limiter both live in
+// chatStore.ts, backed by Redis on a real deploy and by an in-memory Map
+// in local dev, see that file's own comment for why a serverless
+// deployment cannot hold either in plain module memory the way this file
+// once did.
 import { createPublicClient, http, isAddress, recoverMessageAddress, type Address, type Hex } from 'viem'
 import { baseSepolia } from 'viem/chains'
 import { buildChatSignedMessage } from '../src/lib/chatMessage.ts'
+import { DEFAULT_CIPHERTIDE_ADDRESS } from '../src/lib/contractAddress.ts'
+import { appendMessage, isRateLimited, messagesSince } from './chatStore.ts'
 
 const MAX_MESSAGE_LENGTH = 280
 const RATE_LIMIT_WINDOW_MS = 10_000
@@ -25,21 +23,6 @@ const RATE_LIMIT_MAX_MESSAGES = 5
 // or a replay attempt) is refused, the same freshness pattern
 // server/fundHandler.ts uses for its own signed request.
 const FRESHNESS_WINDOW_MS = 5 * 60 * 1000
-// Bounds memory: only the most recent messages per match are kept, well
-// past what any live match's poll cursor should ever fall behind by.
-const MAX_MESSAGES_PER_MATCH = 500
-
-type ChatMessage = {
-  seq: number
-  matchId: string
-  address: Address
-  message: string
-  timestamp: number
-}
-
-const messagesByMatch = new Map<string, ChatMessage[]>()
-const recentSendsByAddress = new Map<string, number[]>()
-let nextSeq = 1
 
 function rpcUrl(): string {
   return (
@@ -72,8 +55,7 @@ const getPlayerAddressAbi = [
 ] as const
 
 async function isMatchPlayer(matchId: bigint, address: Address): Promise<boolean> {
-  const contractAddress = process.env.VITE_CIPHERTIDE_ADDRESS as Address | undefined
-  if (!contractAddress) return false
+  const contractAddress = (process.env.VITE_CIPHERTIDE_ADDRESS as Address | undefined) || DEFAULT_CIPHERTIDE_ADDRESS
   const publicClient = createPublicClient({ chain: baseSepolia, transport: http(rpcUrl()) })
   const [playerA, playerB] = await Promise.all([
     publicClient.readContract({
@@ -91,21 +73,6 @@ async function isMatchPlayer(matchId: bigint, address: Address): Promise<boolean
   ])
   const lower = address.toLowerCase()
   return playerA.toLowerCase() === lower || playerB.toLowerCase() === lower
-}
-
-// True (and rejected) once an address has sent RATE_LIMIT_MAX_MESSAGES
-// within the trailing RATE_LIMIT_WINDOW_MS, independent of matchId so a
-// sender cannot dodge the limit by spraying messages across matches.
-function isRateLimited(addressLower: string): boolean {
-  const now = Date.now()
-  const recent = (recentSendsByAddress.get(addressLower) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS)
-  if (recent.length >= RATE_LIMIT_MAX_MESSAGES) {
-    recentSendsByAddress.set(addressLower, recent)
-    return true
-  }
-  recent.push(now)
-  recentSendsByAddress.set(addressLower, recent)
-  return false
 }
 
 type SendRequestBody = {
@@ -181,17 +148,12 @@ export async function handleChatSend(request: Request): Promise<Response> {
   }
 
   // 3. Anti-spam: a per-sender rate limit.
-  if (isRateLimited(address.toLowerCase())) {
+  if (await isRateLimited(address.toLowerCase(), RATE_LIMIT_WINDOW_MS, RATE_LIMIT_MAX_MESSAGES)) {
     return jsonResponse(429, { error: 'sending too fast, slow down and try again' })
   }
 
-  const entry: ChatMessage = { seq: nextSeq++, matchId, address, message, timestamp }
-  const list = messagesByMatch.get(matchId) || []
-  list.push(entry)
-  if (list.length > MAX_MESSAGES_PER_MATCH) list.splice(0, list.length - MAX_MESSAGES_PER_MATCH)
-  messagesByMatch.set(matchId, list)
-
-  return jsonResponse(200, { seq: entry.seq })
+  const seq = await appendMessage(matchId, address, message, timestamp)
+  return jsonResponse(200, { seq })
 }
 
 export async function handleChatPoll(request: Request): Promise<Response> {
@@ -207,9 +169,6 @@ export async function handleChatPoll(request: Request): Promise<Response> {
   }
   const since = sinceParam && /^\d+$/.test(sinceParam) ? Number(sinceParam) : 0
 
-  const list = messagesByMatch.get(matchId) || []
-  const messages = list.filter((m) => m.seq > since)
-  const cursor = list.length > 0 ? list[list.length - 1].seq : since
-
+  const { messages, cursor } = await messagesSince(matchId, since)
   return jsonResponse(200, { messages, cursor })
 }
