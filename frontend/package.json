@@ -11,11 +11,11 @@
   },
   "dependencies": {
     "@inco/lightning-js": "^1.0.2",
-    "@upstash/redis": "^1.38.2",
     "buffer": "^6.0.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.2",
+    "redis": "^6.2.1",
     "viem": "2.39.3"
   },
   "devDependencies": {

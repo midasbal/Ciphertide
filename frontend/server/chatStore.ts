@@ -7,17 +7,15 @@
 // Vercel serverless deployment has no such process between invocations,
 // each request can land on a fresh instance with empty memory, so
 // production storage has to live somewhere every invocation can reach:
-// a Redis store linked through Vercel's Storage tab (Upstash under the
-// hood, see DEPLOY.md), read here through the standard @upstash/redis
-// client.
+// the Redis store linked through Vercel's Storage tab (see DEPLOY.md),
+// read here through the standard node-redis client.
 //
 // Local dev keeps the original in-memory behavior automatically: when
-// neither KV_REST_API_URL/KV_REST_API_TOKEN nor
-// UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN are set (no store
-// linked), every function below falls back to the same Map-based logic
-// this module replaces, so `npm run dev` keeps working without a real
-// Redis instance.
-import { Redis } from '@upstash/redis'
+// neither KV_REDIS_URL nor REDIS_URL is set (no store linked), every
+// function below falls back to the same Map-based logic this module
+// replaces, so `npm run dev` keeps working without a real Redis
+// instance.
+import { createClient, type RedisClientType } from 'redis'
 import { randomUUID } from 'node:crypto'
 import type { Address } from 'viem'
 
@@ -31,16 +29,46 @@ export type ChatMessage = {
 
 const MAX_MESSAGES_PER_MATCH = 500
 
-// Vercel's Storage tab injects KV_REST_API_URL / KV_REST_API_TOKEN when a
-// Redis store is linked to the project (the naming its Redis product has
-// used since before the @vercel/kv package was deprecated in favor of
-// talking to the same store through @upstash/redis directly). A manually
-// added Upstash Marketplace integration instead injects Upstash's own
-// UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN names. Checking both
-// covers either path without the owner needing to rename anything.
-const redisUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL
-const redisToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
-const redis = redisUrl && redisToken ? new Redis({ url: redisUrl, token: redisToken }) : null
+// The Redis store linked in Vercel's Storage tab injects a single
+// redis:// connection URL named KV_REDIS_URL, not the REST API URL and
+// token pair some Redis integrations use. REDIS_URL is a plain fallback
+// for a manually configured store or a local Redis instance.
+const redisUrl = process.env.KV_REDIS_URL || process.env.REDIS_URL
+
+// A single module-scoped client, reused across warm serverless
+// invocations rather than opened fresh per request. createClient itself
+// does not connect, connect() is called lazily on first real use (see
+// getConnectedClient), and concurrent callers share the same in-flight
+// connect promise so only one connection is ever opened at a time.
+let client: RedisClientType | null = null
+let connectPromise: Promise<unknown> | null = null
+
+function ensureClient(): RedisClientType {
+  if (!client) {
+    client = createClient({ url: redisUrl }) as RedisClientType
+    client.on('error', (err) => {
+      // node-redis requires an error listener or an unhandled connection
+      // error crashes the process. Logged, not thrown: a request already
+      // in flight surfaces its own failure through the rejected command
+      // promise below.
+      console.error('Redis client error', err)
+    })
+  }
+  return client
+}
+
+async function getConnectedClient(): Promise<RedisClientType> {
+  const c = ensureClient()
+  if (!c.isOpen) {
+    if (!connectPromise) {
+      connectPromise = c.connect().finally(() => {
+        connectPromise = null
+      })
+    }
+    await connectPromise
+  }
+  return c
+}
 
 function messagesKey(matchId: string): string {
   return `chat:messages:${matchId}`
@@ -52,22 +80,23 @@ function rateKey(addressLower: string): string {
   return `chat:rate:${addressLower}`
 }
 
-function parseStoredMessage(raw: string | ChatMessage): ChatMessage {
-  return typeof raw === 'string' ? (JSON.parse(raw) as ChatMessage) : raw
+function parseStoredMessage(raw: string): ChatMessage {
+  return JSON.parse(raw) as ChatMessage
 }
 
-// In-memory fallback state, only ever touched when redis is null.
+// In-memory fallback state, only ever touched when redisUrl is unset.
 const memMessagesByMatch = new Map<string, ChatMessage[]>()
 const memRecentSendsByAddress = new Map<string, number[]>()
 let memNextSeq = 1
 
 /** Appends one message for matchId and returns its assigned sequence number. */
 export async function appendMessage(matchId: string, address: Address, message: string, timestamp: number): Promise<number> {
-  if (redis) {
+  if (redisUrl) {
+    const redis = await getConnectedClient()
     const seq = await redis.incr(seqKey(matchId))
     const entry: ChatMessage = { seq, matchId, address, message, timestamp }
-    await redis.rpush(messagesKey(matchId), JSON.stringify(entry))
-    await redis.ltrim(messagesKey(matchId), -MAX_MESSAGES_PER_MATCH, -1)
+    await redis.rPush(messagesKey(matchId), JSON.stringify(entry))
+    await redis.lTrim(messagesKey(matchId), -MAX_MESSAGES_PER_MATCH, -1)
     return seq
   }
 
@@ -82,8 +111,9 @@ export async function appendMessage(matchId: string, address: Address, message: 
 
 /** Every message for matchId with seq greater than since, plus the latest seq as the next poll cursor. */
 export async function messagesSince(matchId: string, since: number): Promise<{ messages: ChatMessage[]; cursor: number }> {
-  if (redis) {
-    const raw = await redis.lrange<string | ChatMessage>(messagesKey(matchId), 0, -1)
+  if (redisUrl) {
+    const redis = await getConnectedClient()
+    const raw = await redis.lRange(messagesKey(matchId), 0, -1)
     const list = raw.map(parseStoredMessage)
     const messages = list.filter((m) => m.seq > since)
     const cursor = list.length > 0 ? list[list.length - 1].seq : since
@@ -105,13 +135,14 @@ export async function messagesSince(matchId: string, since: number): Promise<{ m
 export async function isRateLimited(addressLower: string, windowMs: number, maxMessages: number): Promise<boolean> {
   const now = Date.now()
 
-  if (redis) {
+  if (redisUrl) {
+    const redis = await getConnectedClient()
     const key = rateKey(addressLower)
-    await redis.zremrangebyscore(key, 0, now - windowMs)
-    const count = await redis.zcard(key)
+    await redis.zRemRangeByScore(key, 0, now - windowMs)
+    const count = await redis.zCard(key)
     if (count >= maxMessages) return true
-    await redis.zadd(key, { score: now, member: randomUUID() })
-    await redis.pexpire(key, windowMs)
+    await redis.zAdd(key, { score: now, value: randomUUID() })
+    await redis.pExpire(key, windowMs)
     return false
   }
 
