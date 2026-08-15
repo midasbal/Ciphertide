@@ -23,7 +23,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseSepolia } from 'viem/chains'
-import { buildFundingMessage } from '../src/lib/fundingMessage'
+import { buildFundingMessage } from '../src/lib/fundingMessage.js'
 
 const FUND_AMOUNT_ETH = '0.005'
 // If an address already holds more than this, it counts as already

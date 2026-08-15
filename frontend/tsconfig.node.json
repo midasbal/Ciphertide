@@ -6,9 +6,11 @@
     "types": ["node"],
     "skipLibCheck": true,
 
-    /* Bundler mode */
-    "module": "esnext",
-    "moduleResolution": "bundler",
+    /* Node ESM mode, matching how Vercel's own function compiler
+       resolves these files at runtime: relative imports need an
+       explicit .js extension pointing at the .ts source, see the
+       imports in server/, api/ and vite-plugins/ themselves. */
+    "module": "nodenext",
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,

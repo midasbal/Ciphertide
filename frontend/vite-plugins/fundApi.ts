@@ -1,5 +1,5 @@
 import { loadEnv, type Plugin, type ViteDevServer } from 'vite'
-import { handleFundRequest } from '../server/fundHandler'
+import { handleFundRequest } from '../server/fundHandler.js'
 
 // Basic per-IP throttle, dev-only: refuses a second request from the
 // same address within this window. A real deploy needs this backed by
