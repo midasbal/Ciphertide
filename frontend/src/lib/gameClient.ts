@@ -3,8 +3,9 @@ import { chain, rpcUrls } from './chain'
 import { createIncoLightning } from './inco'
 import { getSigner } from './signer'
 import { CiphertideClient } from '../game'
+import { DEFAULT_CIPHERTIDE_ADDRESS } from './contractAddress'
 
-const ciphertideAddress = import.meta.env.VITE_CIPHERTIDE_ADDRESS as Address | undefined
+const ciphertideAddress = (import.meta.env.VITE_CIPHERTIDE_ADDRESS as Address | undefined) || DEFAULT_CIPHERTIDE_ADDRESS
 
 /**
  * Builds a ready-to-use CiphertideClient for the current signer, or null

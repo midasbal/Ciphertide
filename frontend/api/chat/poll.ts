@@ -1,4 +1,10 @@
-// Serverless entry point for polling an in-match chat's messages, for
-// whenever this app is deployed to a real host. See api/chat/send.ts and
-// server/chatHandler.ts for the rest of this pair's own notes.
-export { handleChatPoll as default } from '../../server/chatHandler.ts'
+// Vercel Node.js serverless function for polling an in-match chat's
+// messages. See api/chat/send.ts and server/chatHandler.ts for the rest
+// of this pair's own notes.
+import { handleChatPoll } from '../../server/chatHandler.ts'
+import { toFetchRequest, sendFetchResponse, type NodeStyleRequest, type NodeStyleResponse } from '../../server/vercelAdapter.ts'
+
+export default async function handler(req: NodeStyleRequest, res: NodeStyleResponse): Promise<void> {
+  const response = await handleChatPoll(toFetchRequest(req))
+  await sendFetchResponse(res, response)
+}
