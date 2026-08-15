@@ -1,6 +1,6 @@
 .decrypt-readout {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--ct-space-3);
   width: 100%;
   box-sizing: border-box;
@@ -9,12 +9,12 @@
   border: 1px solid var(--ct-border-live);
   border-radius: var(--ct-radius-md);
   box-shadow: var(--ct-glow-accent);
-  overflow: hidden;
 }
 
 .decrypt-readout-dot {
   width: 8px;
   height: 8px;
+  margin-top: 0.4em;
   border-radius: 50%;
   background: var(--ct-accent-bright);
   box-shadow: 0 0 10px 2px var(--ct-accent-soft);
@@ -22,14 +22,22 @@
   flex: none;
 }
 
+/* white-space: pre-wrap keeps every literal space the char-by-char
+ * reveal renders while still letting the browser wrap at those spaces,
+ * so a long readout string grows to a second line instead of being
+ * clipped or pushing the box past its container's width. This used to
+ * carry overflow: hidden and text-overflow: clip instead, which cut the
+ * trailing glyph whenever the box's computed width fell a sub-pixel
+ * short of the text's own width, this removes that truncation entirely
+ * rather than trying to widen the box by some margin a longer string
+ * could still exceed. */
 .decrypt-readout-text {
   font-size: clamp(0.6875rem, 1.6vw, 0.8125rem);
   letter-spacing: var(--ct-tracking-wide);
   color: var(--ct-color-glow-bright);
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: clip;
 }
 
 @keyframes readout-pulse {
