@@ -9,6 +9,11 @@ holding a hidden state.
 
 Built for the Inco Track of the Summer Game Jam.
 
+**Play it live at [ciphertide.vercel.app](https://ciphertide.vercel.app)**,
+against the deployed contract at
+[`0xbf4469258DD6ACb1f5F13E488f02Ea25D7958C44`](https://sepolia.basescan.org/address/0xbf4469258DD6ACb1f5F13E488f02Ea25D7958C44)
+on Base Sepolia, verified source included.
+
 ## What makes this confidential
 
 Fleet placement, per-ship layout, and mine positions all live onchain as
@@ -187,3 +192,6 @@ only, no mainnet deployment exists or is planned.
   restart, and a production deploy needs a real stateful host (Redis, a
   KV store, or similar) behind both, not just this repo's dev-time
   wiring.
+- **The board is currently 15x15.** A tighter 10x10 mode is planned to
+  improve pacing, fewer cells to search means a match resolves faster
+  without changing the underlying skill set.
