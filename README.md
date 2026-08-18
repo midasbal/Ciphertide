@@ -182,7 +182,8 @@ deployment (`npm run e2e`, needs its own `.env`, see
 | CiphertideMechanics | `0x8d9146F7B947a6e6372416f354EfA7DA368c9BA0` |
 
 Chain: Base Sepolia (chain id 84532). This project targets Base Sepolia
-only, no mainnet deployment exists or is planned.
+only for now, no mainnet deployment exists today, see Roadmap below for
+later plans.
 
 ## Known limitations
 
@@ -192,6 +193,25 @@ only, no mainnet deployment exists or is planned.
   restart, and a production deploy needs a real stateful host (Redis, a
   KV store, or similar) behind both, not just this repo's dev-time
   wiring.
-- **The board is currently 15x15.** A tighter 10x10 mode is planned to
-  improve pacing, fewer cells to search means a match resolves faster
+- **The board is currently 15x15.** See Roadmap below for a tighter
+  mode under consideration.
+
+## Roadmap
+
+Directions being considered for after the jam, not firm commitments:
+
+- **A 10x10 board mode** alongside the current 15x15 board, for faster,
+  tighter matches, fewer cells to search means a match resolves quicker
   without changing the underlying skill set.
+- **Lower-latency reveals**, an optimistic layer so a shot feels
+  near-instant on screen while the real confirmation still settles
+  onchain behind it.
+- **Single-player practice** against a bot, for learning the captains
+  and the clock without needing a second player.
+- **Tournaments and brackets**, organized play beyond one-off matches.
+- **More captains, and captain partners**, additional characters and
+  skills beyond the current five.
+- **Confidential-NFT loot and a seasonal leaderboard**, cosmetic and
+  progression rewards layered on top of the core duel.
+- **Connect-your-own-wallet support**, and eventually a mainnet
+  deployment, once the game has had more time on testnet.
